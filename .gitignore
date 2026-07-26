@@ -1,0 +1,39 @@
+# Python bytecode and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Local configuration and editor files
+.env
+.env.*
+.vscode/
+.idea/
+
+# Training data and generated datasets
+data/
+datasets/
+downloads/
+
+# Training artifacts: checkpoints, weights, logs, and experiment outputs
+checkpoints/
+weights/
+pretrained_models/
+runs/
+logs/
+outputs/
+tensorboard/
+*.ckpt
+*.pth
+*.pt
+*.onnx
+
+# Test and packaging artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
