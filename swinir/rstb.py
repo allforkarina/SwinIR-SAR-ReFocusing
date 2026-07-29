@@ -29,15 +29,18 @@ class RSTB(nn.Module):
         self,
         dim: int,
         input_resolution: tuple[int, int],
-        depth: int,
-        num_heads: int,
-        window_size: int,
-        mlp_ratio: float = 4.0,
-        qkv_bias: bool = True,
-        qk_scale: float | None = None,
-        drop: float = 0.0,
+        depth: int,         # each RSTB contains how many STL
+        num_heads: int,     # each STL contains how many attention heads
+        window_size: int,   # window size for the Swin Transformer layer
+        mlp_ratio: float = 4.0,         # hidden layer num / input layer num, e.g. input num = 96
+        
+        qkv_bias: bool = True,          # qkv bias
+        qk_scale: float | None = None,  # qk scale, dot product attention scale factor
+
+        drop: float = 0.0,              # dropout rate.
         attn_drop: float = 0.0,
         drop_path: float | list[float] = 0.0,
+
         norm_layer: type[nn.Module] = nn.LayerNorm,
         downsample: type[nn.Module] | None = None,
         use_checkpoint: bool = False,

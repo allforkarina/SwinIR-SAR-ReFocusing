@@ -20,22 +20,36 @@ class PatchEmbed(nn.Module):
         norm_layer: type[nn.Module] | None = None,
     ) -> None:
         super().__init__()
-        self.img_size = to_2tuple(img_size)
-        self.patch_size = to_2tuple(patch_size)
+        self.img_size = to_2tuple(img_size)         # square image size, e.g. [224, 224]
+        self.patch_size = to_2tuple(patch_size)     # square patch size, e.g. [4, 4]
+
+        # divide the image into patches, e.g. 224 / 4 = 56, so the resolution is [56, 56].
         self.patches_resolution = [
             self.img_size[0] // self.patch_size[0],
             self.img_size[1] // self.patch_size[1],
         ]
         self.num_patches = self.patches_resolution[0] * self.patches_resolution[1]
+
+        # input channels, representing the number of feature of the input image, e.g. 2 for real and imaginary parts.
         self.in_chans = in_chans
+
+        # from the input channels extract the more abstract features, e.g. edge, texture, etc.
         self.embed_dim = embed_dim
         self.norm = norm_layer(embed_dim) if norm_layer is not None else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+        # flatten the input tensor from [B, C, H, W] to [B, C, H*W], then transpose to [B, H*W, C].
         x = x.flatten(2).transpose(1, 2)
         return self.norm(x) if self.norm is not None else x
 
     def flops(self) -> int:
+        """Use this function to calculate the number of floating point operations(FLOPs).
+        In this PatchEmbed module, the FLOPs is mainly determined by the normalization layer.
+
+        Returns:
+            int: The number of floating point operations.
+        """
         if self.norm is None:
             return 0
         return self.img_size[0] * self.img_size[1] * self.embed_dim
