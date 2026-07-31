@@ -1,9 +1,9 @@
 """Analyze paired defocused/focused SAR patches without modifying source data.
 
-The server dataset is expected to contain MATLAB 7.3 (HDF5) files.  Echo files
-provide ``coarse_patch`` and image files provide ``pfa_patch``.  The script
-checks every pair structurally, then reads a deterministic, evenly spaced
-subset for numerical statistics.
+MATLAB v5 files use ``patch`` for both sides. MATLAB 7.3 (HDF5) echo/image
+files use ``coarse_patch`` and ``pfa_patch`` respectively. The script checks
+every pair structurally, then reads a deterministic, evenly spaced subset for
+numerical statistics.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from typing import Any
 
 import h5py
 import numpy as np
+from scipy.io import loadmat, whosmat
 
 
 DEFAULT_ECHO_DIR = Path("/data/dyn/capella/output/echo")
@@ -34,6 +35,20 @@ class FilePair:
     key: str
     echo: Path
     image: Path
+
+
+@dataclass(frozen=True)
+class PatchInspection:
+    mat_format: str
+    variable_name: str
+    shape: tuple[int, ...]
+    dtype: str
+    compression: str
+    complex_layout: bool | None
+    metadata: dict[str, float]
+    x_shape: tuple[int, ...] | None
+    y_shape: tuple[int, ...] | None
+    values: np.ndarray | None
 
 
 class PixelMoments:
@@ -207,6 +222,84 @@ def scalar_value(file: h5py.File, name: str) -> float | None:
     return float(value)
 
 
+def inspect_patch_file(path: Path, role: str, load_values: bool) -> PatchInspection:
+    if role not in {"source", "target"}:
+        raise ValueError(f"unknown patch role: {role}")
+    candidates = ("coarse_patch", "patch") if role == "source" else ("pfa_patch", "patch")
+
+    if h5py.is_hdf5(path):
+        with h5py.File(path, "r") as file:
+            variable_name = next((name for name in candidates if name in file), None)
+            if variable_name is None:
+                raise KeyError(
+                    f"{path.name} has none of {candidates}; available={list(file.keys())}"
+                )
+            dataset = file[variable_name]
+            if not isinstance(dataset, h5py.Dataset):
+                raise TypeError(f"{variable_name} is not an HDF5 dataset")
+            names = set(dataset.dtype.names or ())
+            complex_layout = {"real", "imag"}.issubset(names) or np.issubdtype(
+                dataset.dtype, np.complexfloating
+            )
+            metadata = {}
+            for name in (
+                "x0",
+                "y0",
+                "z0",
+                "row1_c",
+                "row2_c",
+                "col1_c",
+                "col2_c",
+                "row1_p",
+                "row2_p",
+                "col1_p",
+                "col2_p",
+            ):
+                value = scalar_value(file, name)
+                if value is not None:
+                    metadata[name] = value
+            values = read_complex(dataset) if load_values else None
+            return PatchInspection(
+                mat_format="matlab_v7.3_hdf5",
+                variable_name=variable_name,
+                shape=tuple(dataset.shape),
+                dtype=dtype_signature(dataset),
+                compression=str(dataset.compression or "none"),
+                complex_layout=complex_layout,
+                metadata=metadata,
+                x_shape=tuple(file["my_x_patch"].shape) if "my_x_patch" in file else None,
+                y_shape=tuple(file["my_y_patch"].shape) if "my_y_patch" in file else None,
+                values=values,
+            )
+
+    variables = {name: (tuple(shape), matlab_class) for name, shape, matlab_class in whosmat(path)}
+    variable_name = next((name for name in candidates if name in variables), None)
+    if variable_name is None:
+        raise KeyError(
+            f"{path.name} has none of {candidates}; available={list(variables)}"
+        )
+    shape, matlab_class = variables[variable_name]
+    values = None
+    complex_layout = None
+    if load_values:
+        values = np.asarray(loadmat(path, variable_names=[variable_name])[variable_name])
+        complex_layout = bool(np.iscomplexobj(values))
+        if not complex_layout:
+            raise TypeError(f"expected complex {variable_name}, got dtype={values.dtype}")
+    return PatchInspection(
+        mat_format="matlab_v5",
+        variable_name=variable_name,
+        shape=shape,
+        dtype=f"matlab_v5:{matlab_class}",
+        compression="matlab_v5",
+        complex_layout=complex_layout,
+        metadata={},
+        x_shape=None,
+        y_shape=None,
+        values=values,
+    )
+
+
 def per_array_metrics(values: np.ndarray) -> dict[str, float | int | None]:
     finite = np.isfinite(values.real) & np.isfinite(values.imag)
     if not finite.all():
@@ -325,6 +418,8 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
 
     source_shapes: Counter[str] = Counter()
     target_shapes: Counter[str] = Counter()
+    source_formats: Counter[str] = Counter()
+    target_formats: Counter[str] = Counter()
     source_dtypes: Counter[str] = Counter()
     target_dtypes: Counter[str] = Counter()
     source_compression: Counter[str] = Counter()
@@ -339,6 +434,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     numeric_error_count = 0
     shape_match_count = 0
     complex_layout_count = 0
+    complex_layout_checked_count = 0
     metadata_match_count = 0
     metadata_mismatch_count = 0
     metadata_mismatch_examples: list[dict[str, Any]] = []
@@ -362,102 +458,100 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         try:
             source_sizes.append(pair.echo.stat().st_size)
             target_sizes.append(pair.image.stat().st_size)
-            with h5py.File(pair.echo, "r") as echo_file, h5py.File(pair.image, "r") as image_file:
-                if "coarse_patch" not in echo_file:
-                    raise KeyError("echo file is missing coarse_patch")
-                if "pfa_patch" not in image_file:
-                    raise KeyError("image file is missing pfa_patch")
-                source_dataset = echo_file["coarse_patch"]
-                target_dataset = image_file["pfa_patch"]
-                if not isinstance(source_dataset, h5py.Dataset):
-                    raise TypeError("coarse_patch is not an HDF5 dataset")
-                if not isinstance(target_dataset, h5py.Dataset):
-                    raise TypeError("pfa_patch is not an HDF5 dataset")
+            load_values = index in numeric_indices
+            source_info = inspect_patch_file(pair.echo, "source", load_values)
+            target_info = inspect_patch_file(pair.image, "target", load_values)
 
-                source_shape = str(tuple(source_dataset.shape))
-                target_shape = str(tuple(target_dataset.shape))
-                source_shapes[source_shape] += 1
-                target_shapes[target_shape] += 1
-                source_dtypes[dtype_signature(source_dataset)] += 1
-                target_dtypes[dtype_signature(target_dataset)] += 1
-                source_compression[str(source_dataset.compression or "none")] += 1
-                target_compression[str(target_dataset.compression or "none")] += 1
-                if source_dataset.shape == target_dataset.shape:
-                    shape_match_count += 1
-
-                source_names = set(source_dataset.dtype.names or ())
-                target_names = set(target_dataset.dtype.names or ())
-                if {"real", "imag"}.issubset(source_names) and {"real", "imag"}.issubset(target_names):
+            source_formats[source_info.mat_format] += 1
+            target_formats[target_info.mat_format] += 1
+            source_shapes[str(source_info.shape)] += 1
+            target_shapes[str(target_info.shape)] += 1
+            source_dtypes[source_info.dtype] += 1
+            target_dtypes[target_info.dtype] += 1
+            source_compression[source_info.compression] += 1
+            target_compression[target_info.compression] += 1
+            if source_info.shape == target_info.shape:
+                shape_match_count += 1
+            if source_info.complex_layout is not None and target_info.complex_layout is not None:
+                complex_layout_checked_count += 1
+                if source_info.complex_layout and target_info.complex_layout:
                     complex_layout_count += 1
+            if target_info.x_shape is not None:
+                target_x_shapes[str(target_info.x_shape)] += 1
+            if target_info.y_shape is not None:
+                target_y_shapes[str(target_info.y_shape)] += 1
 
-                if "my_x_patch" in image_file:
-                    target_x_shapes[str(tuple(image_file["my_x_patch"].shape))] += 1
-                if "my_y_patch" in image_file:
-                    target_y_shapes[str(tuple(image_file["my_y_patch"].shape))] += 1
-
-                metadata_mismatches = []
-                metadata_compared = 0
-                for source_name, target_name in metadata_pairs.items():
-                    source_value = scalar_value(echo_file, source_name)
-                    target_value = scalar_value(image_file, target_name)
-                    if source_value is None or target_value is None:
-                        continue
-                    metadata_compared += 1
-                    if not math.isclose(source_value, target_value, rel_tol=0.0, abs_tol=1e-9):
-                        metadata_mismatches.append(
-                            f"{source_name}={source_value} vs {target_name}={target_value}"
-                        )
-                if metadata_compared:
-                    if metadata_mismatches:
-                        metadata_mismatch_count += 1
-                        if len(metadata_mismatch_examples) < MAX_EXAMPLES:
-                            metadata_mismatch_examples.append(
-                                {"key": pair.key, "differences": metadata_mismatches}
-                            )
-                    else:
-                        metadata_match_count += 1
-
-                readable_pair_count += 1
-                structure_complete = True
-                if index not in numeric_indices:
+            metadata_mismatches = []
+            metadata_compared = 0
+            for source_name, target_name in metadata_pairs.items():
+                source_value = source_info.metadata.get(source_name)
+                target_value = target_info.metadata.get(target_name)
+                if source_value is None or target_value is None:
                     continue
-
-                source = read_complex(source_dataset)
-                target = read_complex(target_dataset)
-                if source.shape != target.shape:
-                    raise ValueError(
-                        f"numeric shapes differ: source={source.shape}, target={target.shape}"
+                metadata_compared += 1
+                if not math.isclose(source_value, target_value, rel_tol=0.0, abs_tol=1e-9):
+                    metadata_mismatches.append(
+                        f"{source_name}={source_value} vs {target_name}={target_value}"
                     )
-                source_pixels.update(source)
-                target_pixels.update(target)
-                source_metrics = per_array_metrics(source)
-                target_metrics = per_array_metrics(target)
-                row: dict[str, Any] = {
-                    "key": pair.key,
-                    "echo_file": pair.echo.name,
-                    "image_file": pair.image.name,
-                    "source_rms": source_metrics["rms"],
-                    "target_rms": target_metrics["rms"],
-                    "rms_ratio_target_over_source": (
-                        target_metrics["rms"] / source_metrics["rms"]
-                        if source_metrics["rms"] > 0
-                        else None
-                    ),
-                    "source_magnitude_median": source_metrics["magnitude_median"],
-                    "target_magnitude_median": target_metrics["magnitude_median"],
-                    "source_magnitude_p99": source_metrics["magnitude_p99"],
-                    "target_magnitude_p99": target_metrics["magnitude_p99"],
-                    "source_max_over_median": source_metrics["max_over_median"],
-                    "target_max_over_median": target_metrics["max_over_median"],
-                    "source_peak_power_fraction": source_metrics["peak_power_fraction"],
-                    "target_peak_power_fraction": target_metrics["peak_power_fraction"],
-                    "source_nonfinite": source_metrics["nonfinite"],
-                    "target_nonfinite": target_metrics["nonfinite"],
-                }
-                row.update(correlation_metrics(source, target))
-                if numeric_order[index] in alignment_positions:
-                    row["alignment"] = best_circular_shift(source, target)
-                sample_rows.append(row)
+            if metadata_compared:
+                if metadata_mismatches:
+                    metadata_mismatch_count += 1
+                    if len(metadata_mismatch_examples) < MAX_EXAMPLES:
+                        metadata_mismatch_examples.append(
+                            {"key": pair.key, "differences": metadata_mismatches}
+                        )
+                else:
+                    metadata_match_count += 1
+
+            readable_pair_count += 1
+            structure_complete = True
+            if not load_values:
+                continue
+
+            source = source_info.values
+            target = target_info.values
+            if source is None or target is None:
+                raise RuntimeError("numeric sampling did not load both matrices")
+            if source.shape != target.shape:
+                raise ValueError(
+                    f"numeric shapes differ: source={source.shape}, target={target.shape}"
+                )
+            source_pixels.update(source)
+            target_pixels.update(target)
+            source_metrics = per_array_metrics(source)
+            target_metrics = per_array_metrics(target)
+            row: dict[str, Any] = {
+                "key": pair.key,
+                "echo_file": pair.echo.name,
+                "image_file": pair.image.name,
+                "source_mat_format": source_info.mat_format,
+                "target_mat_format": target_info.mat_format,
+                "source_variable": source_info.variable_name,
+                "target_variable": target_info.variable_name,
+                "source_numeric_dtype": str(source.dtype),
+                "target_numeric_dtype": str(target.dtype),
+                "source_rms": source_metrics["rms"],
+                "target_rms": target_metrics["rms"],
+                "rms_ratio_target_over_source": (
+                    target_metrics["rms"] / source_metrics["rms"]
+                    if source_metrics["rms"] > 0
+                    else None
+                ),
+                "source_magnitude_median": source_metrics["magnitude_median"],
+                "target_magnitude_median": target_metrics["magnitude_median"],
+                "source_magnitude_p99": source_metrics["magnitude_p99"],
+                "target_magnitude_p99": target_metrics["magnitude_p99"],
+                "source_max_over_median": source_metrics["max_over_median"],
+                "target_max_over_median": target_metrics["max_over_median"],
+                "source_peak_power_fraction": source_metrics["peak_power_fraction"],
+                "target_peak_power_fraction": target_metrics["peak_power_fraction"],
+                "source_nonfinite": source_metrics["nonfinite"],
+                "target_nonfinite": target_metrics["nonfinite"],
+            }
+            row.update(correlation_metrics(source, target))
+            if numeric_order[index] in alignment_positions:
+                row["alignment"] = best_circular_shift(source, target)
+            sample_rows.append(row)
         except Exception as error:  # Continue so one corrupt file does not lose the report.
             if structure_complete and index in numeric_indices:
                 numeric_error_count += 1
@@ -499,7 +593,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     shift_counts = Counter(str(tuple(row["shift"])) for row in alignment_rows)
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "configuration": {
             "echo_dir": str(args.echo_dir.resolve()),
@@ -507,8 +601,8 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
             "sample_count_requested": args.sample_count,
             "alignment_count_requested": args.alignment_count,
             "sampling_strategy": "evenly_spaced_after_sorting_canonical_pair_keys",
-            "source_dataset": "coarse_patch",
-            "target_dataset": "pfa_patch",
+            "source_dataset_candidates": ["coarse_patch", "patch"],
+            "target_dataset_candidates": ["pfa_patch", "patch"],
         },
         "pairing": pairing,
         "structure": {
@@ -517,10 +611,13 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
             "structure_error_count": structure_error_count,
             "structure_error_examples": structure_errors,
             "matching_matrix_shapes": shape_match_count,
+            "complex_layout_checked_pairs": complex_layout_checked_count,
             "matlab_complex_layout_pairs": complex_layout_count,
             "metadata_match_pairs": metadata_match_count,
             "metadata_mismatch_pairs": metadata_mismatch_count,
             "metadata_mismatch_examples": metadata_mismatch_examples,
+            "source_formats": counter_dict(source_formats),
+            "target_formats": counter_dict(target_formats),
             "source_shapes": counter_dict(source_shapes),
             "target_shapes": counter_dict(target_shapes),
             "source_dtypes": counter_dict(source_dtypes),
@@ -577,6 +674,7 @@ def print_summary(report: dict[str, Any], output: Path) -> None:
         f"shape_matches={structure['matching_matrix_shapes']:,}, "
         f"metadata_mismatches={structure['metadata_mismatch_pairs']:,}"
     )
+    print(f"MAT formats: source={structure['source_formats']}, target={structure['target_formats']}")
     print(f"source shapes/dtypes: {structure['source_shapes']} / {structure['source_dtypes']}")
     print(f"target shapes/dtypes: {structure['target_shapes']} / {structure['target_dtypes']}")
     print(
