@@ -16,6 +16,8 @@ env/
 data/
 datasets/
 downloads/
+/trainset/
+/trainset_sample10.tar.gz
 
 # Training artifacts: checkpoints, weights, logs, and experiment outputs
 checkpoints/
