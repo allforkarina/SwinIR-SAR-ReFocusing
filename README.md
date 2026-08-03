@@ -5,7 +5,7 @@
 [实施计划](docs/specifications/SwinIR-SAR_重聚焦实施计划_v0.1.md)
 独立实现 SwinIR 网络架构，用于后续 SAR 实部/虚部双通道同尺寸重聚焦实验。
 
-当前阶段仅包含模型架构与验证，不包含数据集、损失函数、优化器或正式训练。
+当前实现包含模型、严格配对 Dataset 与训练入口；尚不包含独立的 `test.py` 推理/评价脚本。
 
 ## 环境
 
@@ -27,6 +27,30 @@ Windows PowerShell 激活命令为：
 pytest
 python scripts/inspect_model.py
 ```
+
+## SAR 训练
+
+训练配置位于 `configs/train_sar.yaml`。在服务器上先将其中的
+`data.echo_dir` 和 `data.image_dir` 改为真实的 MAT 数据目录，再安装依赖：
+
+```bash
+python -m pip install -r requirements.txt
+python main.py --config configs/train_sar.yaml --run-name sar_baseline_v1
+```
+
+该入口会自动建立基于坐标的训练/保护带/验证集清单，使用每个 echo patch 自身
+的 RMS 同时归一化 echo 与对应 image，并把运行产物写入
+`runs/<run-name>/`。`guard` 样本只用于隔离，不参与训练或验证。
+
+恢复必须显式指定 checkpoint：
+
+```bash
+python main.py --config configs/train_sar.yaml --run-name sar_baseline_v1 \
+  --resume runs/sar_baseline_v1/checkpoints/latest.pt
+```
+
+恢复时会严格比对完整配置与数据 manifest 指纹；任一不一致都会失败，而不会混合
+两次不同的数据划分或训练设定。
 
 ## 使用
 

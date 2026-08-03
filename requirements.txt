@@ -4,3 +4,4 @@ PyYAML>=6.0
 numpy>=1.26
 h5py>=3.10
 scipy>=1.11
+tensorboard>=2.14

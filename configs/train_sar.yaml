@@ -1,0 +1,58 @@
+# Baseline training contract for 512x512 complex SAR refocusing patches.
+model:
+  img_size: 512
+  patch_size: 1
+  in_chans: 2
+  embed_dim: 180
+  depths: [6, 6, 6, 6, 6, 6]
+  num_heads: [6, 6, 6, 6, 6, 6]
+  window_size: 8
+  mlp_ratio: 2.0
+  qkv_bias: true
+  qk_scale: null
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.1
+  ape: false
+  patch_norm: true
+  use_checkpoint: false
+  upscale: 1
+  img_range: 1.0
+  upsampler: ""
+  resi_connection: "1conv"
+
+data:
+  # Replace these paths on the training server; they must contain matching MAT files.
+  echo_dir: /path/to/echo
+  image_dir: /path/to/image
+  expected_shape: [512, 512]
+  rms_epsilon: 1.0e-12
+  validation_region: {row_min: 3301, row_max: 6201, col_min: 8200, col_max: 13500}
+  guard_region: {row_min: 2801, row_max: 6701, col_min: 7700, col_max: 14000}
+  expected_split_counts: {train: 13780, guard: 940, validation: 1620}
+  num_workers: 4
+  prefetch_factor: 2
+
+optimization:
+  optimizer: adam
+  learning_rate: 2.0e-4
+  betas: [0.9, 0.99]
+  epsilon: 1.0e-8
+  weight_decay: 0.0
+  total_steps: 150000
+  milestones: [75000, 120000, 135000, 142500]
+  gamma: 0.5
+  loss: complex_charbonnier
+  charbonnier_epsilon: 1.0e-3
+  ema_decay: 0.999
+
+runtime:
+  seed: 42
+  strict_reproducibility: false
+  batch_size: 1
+  accumulation_steps: 1
+  validation_interval_steps: 5000
+  archive_interval_steps: 25000
+  log_interval_steps: 200
+  max_consecutive_fp16_overflows: 8
+  output_root: runs
