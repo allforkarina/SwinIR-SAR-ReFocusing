@@ -22,9 +22,8 @@ model:
   resi_connection: "1conv"
 
 data:
-  # Replace these paths on the training server; they must contain matching MAT files.
-  echo_dir: /path/to/echo
-  image_dir: /path/to/image
+  echo_dir: /data/dyn/capella/output/echo
+  image_dir: /data/dyn/capella/output/image
   expected_shape: [512, 512]
   rms_epsilon: 1.0e-12
   validation_region: {row_min: 3301, row_max: 6201, col_min: 8200, col_max: 13500}
