@@ -50,7 +50,8 @@ except ModuleNotFoundError:  # Support ``python scripts/analyze_patch_adjacency.
 
 
 COORDINATE_PATTERN = re.compile(
-    r"^patch_row_([+-]?\d+)_col_([+-]?\d+)\.mat$", re.IGNORECASE
+    r"^patch_row_([+-]?\d+)_col_([+-]?\d+)(?:_(\d+))?\.mat$",
+    re.IGNORECASE,
 )
 MAX_EXAMPLES = 20
 

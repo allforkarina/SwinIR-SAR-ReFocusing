@@ -19,6 +19,7 @@ from scripts.analyze_patch_adjacency import (
 
 def test_parse_coordinate_accepts_signed_server_coordinates() -> None:
     assert parse_coordinate(Path("patch_row_-100_col_+2300.mat")) == (-100, 2300)
+    assert parse_coordinate(Path("patch_row_-100_col_+2300_2.mat")) == (-100, 2300)
     assert parse_coordinate(Path("other.mat")) is None
 
 
