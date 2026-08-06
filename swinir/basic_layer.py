@@ -14,18 +14,18 @@ from .swin_block import SwinTransformerBlock
 class BasicLayer(nn.Module):
     def __init__(
         self,
-        dim: int,
-        input_resolution: tuple[int, int],
-        depth: int,
-        num_heads: int,
-        window_size: int,
+        dim: int,                                       # input channel: 2->96
+        input_resolution: tuple[int, int],              # input size of feature map: [512, 512]
+        depth: int,                                     # number of Swin Transformer blocks.
+        num_heads: int,                                 # number of heads for each block.
+        window_size: int,                               # size of the attention window.
         mlp_ratio: float = 4.0,
         qkv_bias: bool = True,
         qk_scale: float | None = None,
-        drop: float = 0.0,
-        attn_drop: float = 0.0,
-        drop_path: float | list[float] = 0.0,
-        norm_layer: type[nn.Module] = nn.LayerNorm,
+        drop: float = 0.0,                              # dropout rate.
+        attn_drop: float = 0.0,                         # attention dropout rate.
+        drop_path: float | list[float] = 0.0,           # stochastic depth rate.（随机跳过残差连接过程）
+        norm_layer: type[nn.Module] = nn.LayerNorm,     # normalization: LayerNorm.
         downsample: type[nn.Module] | None = None,
         use_checkpoint: bool = False,
     ) -> None:
@@ -35,6 +35,7 @@ class BasicLayer(nn.Module):
         self.depth = depth
         self.use_checkpoint = use_checkpoint
 
+        # if the drop_path is a list, length must equal to depth, each block need a rate.
         if isinstance(drop_path, list) and len(drop_path) != depth:
             raise ValueError(
                 f"drop_path list length {len(drop_path)} must equal depth={depth}"
