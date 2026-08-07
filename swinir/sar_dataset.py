@@ -26,7 +26,7 @@ from torch.utils.data import Dataset, Sampler
 
 
 COORDINATE_PATTERN = re.compile(
-    r"^patch_row_([+-]?\d+)_col_([+-]?\d+)\.mat$", re.IGNORECASE
+    r"^patch_row_([+-]?\d+)_col_([+-]?\d+)(?:_\d+)?\.mat$", re.IGNORECASE
 )
 MANIFEST_SCHEMA_VERSION = 1
 

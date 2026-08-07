@@ -32,6 +32,10 @@ def test_coordinate_region_and_parser_have_inclusive_boundaries() -> None:
         3301,
         8200,
     )
+    assert parse_patch_coordinate(Path("patch_row_17200_col_4000_2.mat")) == (
+        17200,
+        4000,
+    )
 
 
 def test_discover_pairs_is_coordinate_strict(tmp_path: Path) -> None:
