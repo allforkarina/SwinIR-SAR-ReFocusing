@@ -39,3 +39,7 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+
+# Local-only analysis results and test scripts
+/tmp/
+/tests/
