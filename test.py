@@ -36,7 +36,7 @@ from swinir.training import (
 )
 
 
-CHECKPOINT_SCHEMA_VERSION = 2
+SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS = frozenset({1, 2})
 TEST_REPORT_SCHEMA_VERSION = 1
 DEFAULT_CHECKPOINT = Path("runs/sar_baseline_v1/checkpoints/best.pt")
 
@@ -114,7 +114,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _checkpoint_config(checkpoint: dict[str, Any]) -> dict[str, Any]:
-    if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+    if checkpoint.get("schema_version") not in SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS:
         raise RuntimeError(
             "unsupported checkpoint schema version: "
             f"{checkpoint.get('schema_version')!r}"
