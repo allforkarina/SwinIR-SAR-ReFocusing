@@ -16,8 +16,8 @@ from .window_ops import window_partition, window_reverse
 class SwinTransformerBlock(nn.Module):
     def __init__(
         self,
-        dim: int,
-        input_resolution: tuple[int, int],
+        dim: int,                                           # feature channel dimension
+        input_resolution: tuple[int, int],                  # input feature size: [512, 512]
         num_heads: int,
         window_size: int = 7,
         shift_size: int = 0,
@@ -31,22 +31,25 @@ class SwinTransformerBlock(nn.Module):
         norm_layer: type[nn.Module] = nn.LayerNorm,
     ) -> None:
         super().__init__()
-        self.dim = dim
-        self.input_resolution = tuple(input_resolution)
-        self.num_heads = num_heads
-        self.window_size = window_size
-        self.shift_size = shift_size
+        self.dim = dim                                      # feature channel dimension
+        self.input_resolution = tuple(input_resolution)     # input feature size: [512, 512]
+        self.num_heads = num_heads                          # number of attention heads, each head refer to one feature subspace.
+        self.window_size = window_size                      # window size for window-based self-attention, etc: 7x7.
+        self.shift_size = shift_size                        # window shift size.
         self.mlp_ratio = mlp_ratio
 
+        # Raw patch size should be larger than the window size.
         if min(self.input_resolution) <= self.window_size:
             self.shift_size = 0
             self.window_size = min(self.input_resolution)
+
+        # each shift should be smaller than the window size.
         if not 0 <= self.shift_size < self.window_size:
             raise ValueError(
                 f"shift_size={self.shift_size} must be in [0, {self.window_size})"
             )
 
-        self.norm1 = norm_layer(dim)
+        self.norm1 = norm_layer(dim)                        # LayerNorm for each input feature channel.
         self.attn = WindowAttention(
             dim,
             window_size=to_2tuple(self.window_size),

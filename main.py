@@ -49,7 +49,7 @@ from swinir.training import (
 )
 
 
-CHECKPOINT_SCHEMA_VERSION = 1
+CHECKPOINT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -61,6 +61,39 @@ class RunPaths:
     manifest: Path
     resolved_config: Path
     crash_report: Path
+
+
+@dataclass
+class EarlyStoppingState:
+    """Progress of validation-based early stopping, persisted in checkpoints."""
+
+    bad_validation_count: int = 0
+    stopped: bool = False
+
+    def as_dict(self) -> dict[str, int | bool]:
+        return {
+            "bad_validation_count": self.bad_validation_count,
+            "stopped": self.stopped,
+        }
+
+
+def update_early_stopping(
+    state: EarlyStoppingState,
+    *,
+    current_value: float,
+    best_value: float,
+    patience: int,
+    min_delta: float,
+) -> bool:
+    """Update state after one validation and return whether the metric improved."""
+
+    improved = current_value < best_value - min_delta
+    if improved:
+        state.bad_validation_count = 0
+    else:
+        state.bad_validation_count += 1
+        state.stopped = state.bad_validation_count >= patience
+    return improved
 
 
 def parse_args() -> argparse.Namespace:
@@ -107,6 +140,20 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("all scheduler milestones must be positive")
     if sorted(optimization["milestones"]) != optimization["milestones"]:
         raise ValueError("scheduler milestones must be sorted")
+    early_stopping = runtime.get("early_stopping")
+    if not isinstance(early_stopping, dict):
+        raise ValueError("runtime.early_stopping must be a mapping")
+    patience = early_stopping.get("patience")
+    min_delta = early_stopping.get("min_delta")
+    if not isinstance(patience, int) or isinstance(patience, bool) or patience <= 0:
+        raise ValueError("runtime.early_stopping.patience must be a positive integer")
+    if (
+        not isinstance(min_delta, (int, float))
+        or isinstance(min_delta, bool)
+        or not math.isfinite(float(min_delta))
+        or min_delta < 0
+    ):
+        raise ValueError("runtime.early_stopping.min_delta must be a finite non-negative number")
 
 
 def make_run_paths(output_root: Path, run_name: str, resuming: bool) -> RunPaths:
@@ -235,6 +282,7 @@ def checkpoint_payload(
     sample_offset: int,
     sampler: ResumableEpochSampler,
     best_metrics: dict[str, float],
+    early_stopping_state: EarlyStoppingState,
     manifest_fingerprint: str,
     config: dict[str, Any],
     precision: PrecisionPolicy,
@@ -251,6 +299,7 @@ def checkpoint_payload(
         "sample_offset": sample_offset,
         "sampler": {"seed": sampler.seed, "epoch": epoch, "start_index": sample_offset},
         "best_metrics": best_metrics,
+        "early_stopping": early_stopping_state.as_dict(),
         "rng": capture_rng_state(),
         "manifest_fingerprint": manifest_fingerprint,
         "config": config,
@@ -465,6 +514,7 @@ def run_training(config: dict[str, Any], args: argparse.Namespace) -> None:
     epoch = 0
     sample_offset = 0
     best_metrics = {"charbonnier": math.inf, "complex_rmse": math.inf}
+    early_stopping_state = EarlyStoppingState()
 
     if args.resume is not None:
         checkpoint = load_checkpoint_strict(
@@ -482,6 +532,11 @@ def run_training(config: dict[str, Any], args: argparse.Namespace) -> None:
         epoch = int(checkpoint["epoch"])
         sample_offset = int(checkpoint["sample_offset"])
         best_metrics = dict(checkpoint["best_metrics"])
+        checkpoint_early_stopping = checkpoint["early_stopping"]
+        early_stopping_state = EarlyStoppingState(
+            bad_validation_count=int(checkpoint_early_stopping["bad_validation_count"]),
+            stopped=bool(checkpoint_early_stopping["stopped"]),
+        )
         logger.info("resumed step=%s epoch=%s offset=%s", global_step, epoch, sample_offset)
     else:
         initial_metrics = validate(
@@ -495,7 +550,14 @@ def run_training(config: dict[str, Any], args: argparse.Namespace) -> None:
     writer = SummaryWriter(log_dir=run_paths.root / "tensorboard")
     overflow_streak = 0
     total_steps = int(optimization["total_steps"])
+    early_stopping = runtime["early_stopping"]
     try:
+        if early_stopping_state.stopped:
+            logger.warning(
+                "checkpoint was already early-stopped at step=%s; no training steps will run",
+                global_step,
+            )
+            return
         while global_step < total_steps:
             sampler.set_position(epoch, sample_offset)
             for batch in train_loader:
@@ -543,7 +605,13 @@ def run_training(config: dict[str, Any], args: argparse.Namespace) -> None:
                     for name, value in validation_metrics.items():
                         writer.add_scalar(f"validation/{name}", value, global_step)
                     logger.info("validation %s", metrics)
-                    is_best = validation_metrics["charbonnier"] < best_metrics["charbonnier"]
+                    is_best = update_early_stopping(
+                        early_stopping_state,
+                        current_value=validation_metrics["charbonnier"],
+                        best_value=best_metrics["charbonnier"],
+                        patience=int(early_stopping["patience"]),
+                        min_delta=float(early_stopping["min_delta"]),
+                    )
                     if is_best:
                         best_metrics = validation_metrics
                     checkpoint_args = dict(
@@ -557,6 +625,7 @@ def run_training(config: dict[str, Any], args: argparse.Namespace) -> None:
                         sample_offset=sample_offset,
                         sampler=sampler,
                         best_metrics=best_metrics,
+                        early_stopping_state=early_stopping_state,
                         manifest_fingerprint=manifest.fingerprint,
                         config=config,
                         precision=precision,
@@ -568,8 +637,23 @@ def run_training(config: dict[str, Any], args: argparse.Namespace) -> None:
                         save_checkpoint(
                             run_paths.checkpoints / f"step_{global_step:06d}.pt", **checkpoint_args
                         )
+                    if early_stopping_state.stopped:
+                        early_stopping_metrics = {
+                            "step": global_step,
+                            "split": "event",
+                            "event": "early_stopping",
+                            "metric": "charbonnier",
+                            "value": validation_metrics["charbonnier"],
+                            "best_value": best_metrics["charbonnier"],
+                            "bad_validation_count": early_stopping_state.bad_validation_count,
+                        }
+                        append_metrics(run_paths.metrics_jsonl, early_stopping_metrics)
+                        logger.info("early stopping %s", early_stopping_metrics)
+                        break
                 if global_step >= total_steps:
                     break
+            if early_stopping_state.stopped:
+                break
             if sample_offset >= len(train_dataset):
                 epoch += 1
                 sample_offset = 0
@@ -586,6 +670,7 @@ def run_training(config: dict[str, Any], args: argparse.Namespace) -> None:
             sample_offset=sample_offset,
             sampler=sampler,
             best_metrics=best_metrics,
+            early_stopping_state=early_stopping_state,
             manifest_fingerprint=manifest.fingerprint,
             config=config,
             precision=precision,

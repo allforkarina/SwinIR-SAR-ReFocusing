@@ -54,4 +54,7 @@ runtime:
   archive_interval_steps: 25000
   log_interval_steps: 200
   max_consecutive_fp16_overflows: 8
+  early_stopping:
+    patience: 10
+    min_delta: 0.0
   output_root: runs
