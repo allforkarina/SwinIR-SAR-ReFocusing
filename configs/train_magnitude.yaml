@@ -1,0 +1,37 @@
+# B2-A diagnostic: restore focused log magnitude from defocused log magnitude.
+model:
+  img_size: 512
+  patch_size: 1
+  in_chans: 1
+  embed_dim: 180
+  depths: [6, 6, 6, 6, 6, 6]
+  num_heads: [6, 6, 6, 6, 6, 6]
+  window_size: 8
+  mlp_ratio: 2.0
+  qkv_bias: true
+  qk_scale: null
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.1
+  ape: false
+  patch_norm: true
+  use_checkpoint: false
+  upscale: 1
+  img_range: 1.0
+  upsampler: ""
+  resi_connection: "1conv"
+
+data:
+  expected_shape: [512, 512]
+  rms_epsilon: 1.0e-12
+  representation: echo_rms_log1p_magnitude
+
+optimization:
+  optimizer: adam
+  learning_rate: 2.0e-4
+  betas: [0.9, 0.99]
+  epsilon: 1.0e-8
+  weight_decay: 0.0
+  loss: magnitude_charbonnier
+  charbonnier_epsilon: 1.0e-3
+  ema_decay: 0.999
