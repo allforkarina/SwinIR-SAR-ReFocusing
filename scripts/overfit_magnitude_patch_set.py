@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import sys
@@ -343,11 +344,43 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("learning_rate must be finite and positive")
     if not 0.0 <= args.ema_decay < 1.0:
         raise ValueError("ema_decay must be in [0, 1)")
+    if args.allow_step_extension and args.resume is None:
+        raise ValueError("allow_step_extension requires --resume")
     for role, path in (("Echo", args.echo_dir), ("Image", args.image_dir)):
         if not path.is_dir():
             raise FileNotFoundError(f"{role} directory does not exist: {path}")
     if args.resume is not None and not args.resume.is_file():
         raise FileNotFoundError(f"resume checkpoint does not exist: {args.resume}")
+
+
+def validate_resume_config(
+    existing_config: dict[str, Any],
+    requested_config: dict[str, Any],
+    *,
+    allow_step_extension: bool,
+) -> tuple[dict[str, Any], int | None]:
+    """Return the strict checkpoint config and an optional previous step limit."""
+
+    if existing_config == requested_config:
+        return existing_config, None
+    if not allow_step_extension:
+        raise RuntimeError("output directory resolved_config.json does not match this run")
+
+    previous_max_steps = int(existing_config["optimization"]["max_steps"])
+    requested_max_steps = int(requested_config["optimization"]["max_steps"])
+    if requested_max_steps <= previous_max_steps:
+        raise RuntimeError(
+            "step extension must increase optimization.max_steps: "
+            f"previous={previous_max_steps}, requested={requested_max_steps}"
+        )
+    expected_config = copy.deepcopy(existing_config)
+    expected_config["optimization"]["max_steps"] = requested_max_steps
+    if expected_config != requested_config:
+        raise RuntimeError(
+            "step extension may change only optimization.max_steps; "
+            "another configuration or sample-set field differs"
+        )
+    return existing_config, previous_max_steps
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -399,6 +432,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     paths = make_run_paths(args.output_dir, resuming=args.resume is not None)
     manifest_path = paths.root / "selected_samples.json"
+    checkpoint_resolved_config = resolved_config
+    previous_max_steps: int | None = None
     if args.resume is None:
         write_json(paths.resolved_config, resolved_config)
         write_json(manifest_path, manifest)
@@ -409,8 +444,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     f"resume output directory is missing {required_path.name}"
                 )
         existing_config = json.loads(paths.resolved_config.read_text(encoding="utf-8"))
-        if existing_config != resolved_config:
-            raise RuntimeError("output directory resolved_config.json does not match this run")
+        checkpoint_resolved_config, previous_max_steps = validate_resume_config(
+            existing_config,
+            resolved_config,
+            allow_step_extension=bool(args.allow_step_extension),
+        )
 
     print("selected magnitude patch set:", flush=True)
     for index, sample in enumerate(samples):
@@ -454,7 +492,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             optimizer=optimizer,
             scheduler=scheduler,
             scaler=scaler,
-            resolved_config=resolved_config,
+            resolved_config=checkpoint_resolved_config,
             device=device,
         )
         step = int(checkpoint["step"])
@@ -462,6 +500,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         consecutive_successes = int(checkpoint["consecutive_successes"])
         success_step = checkpoint["success_step"]
         last_metrics = dict(checkpoint["last_metrics"])
+        if previous_max_steps is not None:
+            if int(args.steps) <= step:
+                raise RuntimeError(
+                    "extended max_steps must exceed the restored checkpoint step: "
+                    f"checkpoint={step}, requested={args.steps}"
+                )
         print(f"resumed step={step} from {args.resume}", flush=True)
 
     def checkpoint_kwargs() -> dict[str, Any]:
@@ -478,6 +522,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "success_step": success_step,
             "last_metrics": last_metrics,
         }
+
+    if previous_max_steps is not None:
+        save_checkpoint(paths.checkpoints / "extension_start.pt", **checkpoint_kwargs())
+        save_checkpoint(paths.checkpoints / "latest.pt", **checkpoint_kwargs())
+        write_json(paths.resolved_config, resolved_config)
+        print(
+            f"extended max_steps={previous_max_steps}->{args.steps} "
+            f"after strict restore from step={step}",
+            flush=True,
+        )
 
     def evaluate_and_record(
         mean_train_loss: float | None,
@@ -634,6 +688,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "required_consecutive_successes": args.required_consecutive_successes,
         "success_criteria": asdict(criteria),
         "selection_manifest": manifest,
+        "resume": {
+            "checkpoint": str(args.resume.resolve()) if args.resume is not None else None,
+            "step_extension": previous_max_steps is not None,
+            "previous_max_steps": previous_max_steps,
+            "target_max_steps": int(args.steps),
+        },
         "representation": resolved_config["data"],
         "precision": precision.as_dict(),
         "baselines": baselines,
@@ -666,6 +726,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--anchor-filename", default=DEFAULT_ANCHOR)
     parser.add_argument("--sample-count", type=int, default=16)
     parser.add_argument("--resume", type=Path, default=None)
+    parser.add_argument(
+        "--allow-step-extension",
+        action="store_true",
+        help="Allow only optimization.max_steps to increase when strictly resuming.",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--steps", type=int, default=64000)
     parser.add_argument("--eval-every", type=int, default=1600)

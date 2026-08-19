@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 import yaml
 from scipy.io import savemat
 
@@ -14,6 +15,7 @@ from scripts.overfit_magnitude_patch_set import (
     run,
     summarize_metric_map,
     validate_args,
+    validate_resume_config,
 )
 from scripts.overfit_single_magnitude_patch import MagnitudeSuccessCriteria
 from swinir.sar_dataset import discover_pairs
@@ -79,6 +81,7 @@ def _args(
         anchor_filename=anchor_filename,
         sample_count=2,
         resume=resume,
+        allow_step_extension=False,
         device="cpu",
         steps=2,
         eval_every=2,
@@ -153,6 +156,34 @@ def test_validate_args_requires_whole_epoch_evaluations(tmp_path: Path) -> None:
         validate_args(args)
 
 
+def test_step_extension_allows_only_a_larger_max_steps() -> None:
+    existing = {
+        "model": {"in_chans": 1},
+        "optimization": {"max_steps": 2, "learning_rate": 2.0e-4},
+    }
+    requested = {
+        "model": {"in_chans": 1},
+        "optimization": {"max_steps": 4, "learning_rate": 2.0e-4},
+    }
+
+    checkpoint_config, previous = validate_resume_config(
+        existing, requested, allow_step_extension=True
+    )
+
+    assert checkpoint_config == existing
+    assert previous == 2
+    changed_learning_rate = {
+        **requested,
+        "optimization": {"max_steps": 4, "learning_rate": 1.0e-4},
+    }
+    with pytest.raises(RuntimeError, match="may change only"):
+        validate_resume_config(
+            existing,
+            changed_learning_rate,
+            allow_step_extension=True,
+        )
+
+
 def test_tiny_joint_run_writes_manifest_metrics_and_resumes(tmp_path: Path) -> None:
     config = tmp_path / "tiny.yaml"
     _write_config(config)
@@ -202,3 +233,30 @@ def test_tiny_joint_run_writes_manifest_metrics_and_resumes(tmp_path: Path) -> N
         )
     )
     assert resumed["step"] == 2
+
+    extended_args = _args(
+        config=config,
+        echo_dir=echo_dir,
+        image_dir=image_dir,
+        output_dir=output_dir,
+        anchor_filename=anchor,
+        resume=output_dir / "checkpoints" / "best.pt",
+    )
+    extended_args.steps = 4
+    extended_args.allow_step_extension = True
+    extended = run(extended_args)
+
+    assert extended["step"] == 4
+    assert extended["resume"]["step_extension"]
+    assert extended["resume"]["previous_max_steps"] == 2
+    assert (output_dir / "checkpoints" / "extension_start.pt").is_file()
+    resolved = json.loads(
+        (output_dir / "resolved_config.json").read_text(encoding="utf-8")
+    )
+    assert resolved["optimization"]["max_steps"] == 4
+    extension_start = torch.load(
+        output_dir / "checkpoints" / "extension_start.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert extension_start["resolved_config"]["optimization"]["max_steps"] == 4
