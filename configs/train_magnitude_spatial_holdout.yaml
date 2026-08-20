@@ -1,0 +1,68 @@
+# E004: same-scene spatially isolated log-magnitude generalization.
+model:
+  img_size: 512
+  patch_size: 1
+  in_chans: 1
+  embed_dim: 180
+  depths: [6, 6, 6, 6, 6, 6]
+  num_heads: [6, 6, 6, 6, 6, 6]
+  window_size: 8
+  mlp_ratio: 2.0
+  qkv_bias: true
+  qk_scale: null
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.0
+  ape: false
+  patch_norm: true
+  use_checkpoint: false
+  upscale: 1
+  img_range: 1.0
+  upsampler: ""
+  resi_connection: "1conv"
+
+data:
+  expected_shape: [512, 512]
+  rms_epsilon: 1.0e-12
+  representation: echo_rms_log1p_magnitude
+  validation_region: {row_min: 16400, row_max: 18400, col_min: 7700, col_max: 9700}
+  guard_region: {row_min: 15888, row_max: 18912, col_min: 7188, col_max: 10212}
+  expected_split_counts: {train: 15714, guard: 520, validation: 441}
+  num_workers: 4
+  prefetch_factor: 2
+
+optimization:
+  optimizer: adam
+  learning_rate: 2.0e-4
+  betas: [0.9, 0.99]
+  epsilon: 1.0e-8
+  weight_decay: 0.0
+  learning_rate_schedule: constant
+  total_steps: 150000
+  loss: magnitude_charbonnier
+  charbonnier_epsilon: 1.0e-3
+  ema_decay: 0.999
+
+runtime:
+  seed: 42
+  strict_reproducibility: false
+  batch_size: 1
+  validation_interval_steps: 5000
+  archive_interval_steps: 25000
+  log_interval_steps: 200
+  max_consecutive_fp16_overflows: 8
+  early_stopping:
+    patience: 10
+    min_delta: 1.0e-4
+
+evaluation:
+  authority: raw_model_spatial_validation
+  success_criteria:
+    mean_rmse_relative_improvement_min: 0.10
+    median_rmse_relative_improvement_min: 0.10
+    rmse_win_fraction_min: 0.75
+    require_mean_correlation_improvement: true
+    require_mean_psnr_improvement: true
+    require_mean_ssim_improvement: true
+    median_magnitude_rms_ratio_min: 0.90
+    median_magnitude_rms_ratio_max: 1.10
