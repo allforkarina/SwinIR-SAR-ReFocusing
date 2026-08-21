@@ -13,6 +13,7 @@ from scipy.io import savemat
 from scripts.train_magnitude_spatial_holdout import (
     MagnitudePatchDataset,
     compare_to_identity,
+    linear_magnitude_rms_log_ratio_loss,
     run,
     summarize_metrics,
 )
@@ -62,7 +63,12 @@ def _success_criteria() -> dict[str, object]:
     }
 
 
-def _write_config(path: Path, expected_counts: dict[str, int]) -> None:
+def _write_config(
+    path: Path,
+    expected_counts: dict[str, int],
+    *,
+    energy_weight: float = 0.0,
+) -> None:
     config = {
         "model": _model_config(),
         "data": {
@@ -93,8 +99,15 @@ def _write_config(path: Path, expected_counts: dict[str, int]) -> None:
             "weight_decay": 0.0,
             "learning_rate_schedule": "constant",
             "total_steps": 2,
-            "loss": "magnitude_charbonnier",
+            "loss": (
+                "magnitude_charbonnier_plus_linear_rms_log_ratio"
+                if energy_weight > 0
+                else "magnitude_charbonnier"
+            ),
             "charbonnier_epsilon": 1.0e-3,
+            "linear_rms_log_ratio_weight": energy_weight,
+            "linear_rms_epsilon": 1.0e-6,
+            "linear_rms_max_log_value": 20.0,
             "ema_decay": 0.999,
         },
         "runtime": {
@@ -247,6 +260,38 @@ def test_success_requires_distribution_wide_multi_metric_improvement() -> None:
     assert comparison["rmse_win_fraction"] == 1.0
 
 
+def test_linear_magnitude_rms_log_ratio_loss_is_scale_symmetric() -> None:
+    target_magnitude = torch.full((2, 1, 4, 4), 2.0)
+    half_prediction = torch.full((2, 1, 4, 4), 1.0)
+    double_prediction = torch.full((2, 1, 4, 4), 4.0)
+    target = torch.log1p(target_magnitude)
+
+    half_loss = linear_magnitude_rms_log_ratio_loss(
+        torch.log1p(half_prediction), target
+    )
+    double_loss = linear_magnitude_rms_log_ratio_loss(
+        torch.log1p(double_prediction), target
+    )
+    matched_loss = linear_magnitude_rms_log_ratio_loss(target, target)
+
+    expected = half_loss.new_tensor(np.log(2.0))
+    assert torch.isclose(half_loss, expected, atol=2.0e-6)
+    assert torch.isclose(double_loss, expected, atol=2.0e-6)
+    assert float(matched_loss) < 1.0e-7
+
+
+def test_linear_magnitude_rms_log_ratio_loss_has_finite_gradient() -> None:
+    prediction = torch.full((1, 1, 4, 4), np.log1p(1.0), requires_grad=True)
+    target = torch.full((1, 1, 4, 4), np.log1p(2.0))
+
+    loss = linear_magnitude_rms_log_ratio_loss(prediction, target)
+    loss.backward()
+
+    assert prediction.grad is not None
+    assert bool(torch.isfinite(prediction.grad).all())
+    assert float(prediction.grad.abs().sum()) > 0
+
+
 def test_tiny_cpu_run_writes_strict_artifacts_and_resumes(tmp_path: Path) -> None:
     echo_dir = tmp_path / "echo"
     image_dir = tmp_path / "image"
@@ -280,3 +325,29 @@ def test_tiny_cpu_run_writes_strict_artifacts_and_resumes(tmp_path: Path) -> Non
     assert resumed["global_step"] == 2
     written = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert written["manifest_fingerprint"] == first["manifest_fingerprint"]
+
+
+def test_tiny_energy_run_records_both_loss_components(tmp_path: Path) -> None:
+    echo_dir = tmp_path / "echo"
+    image_dir = tmp_path / "image"
+    _write_grid(echo_dir, image_dir)
+    config = tmp_path / "energy_config.yaml"
+    _write_config(
+        config,
+        {"train": 24, "guard": 0, "validation": 1},
+        energy_weight=0.10,
+    )
+    output = tmp_path / "energy_run"
+
+    result = run(_args(config, echo_dir, image_dir, output))
+
+    assert result["global_step"] == 2
+    records = [
+        json.loads(line)
+        for line in (output / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    train_records = [record for record in records if record["split"] == "train"]
+    assert len(train_records) == 2
+    assert all("charbonnier_loss" in record for record in train_records)
+    assert all("linear_rms_log_ratio_loss" in record for record in train_records)
+    assert all(record["linear_rms_log_ratio_weight"] == 0.10 for record in train_records)

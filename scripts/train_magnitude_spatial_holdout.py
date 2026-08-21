@@ -33,8 +33,8 @@ from main import (
 )
 from scripts.overfit_single_magnitude_patch import (
     evaluate_log_magnitude_prediction,
+    magnitude_charbonnier_loss,
     prepare_log_magnitude_pair,
-    train_magnitude_step,
 )
 from scripts.overfit_single_patch import append_jsonl, utc_now, write_json
 from swinir import SwinIR
@@ -53,9 +53,11 @@ from swinir.training import (
     capture_rng_state,
     make_ema_model,
     make_grad_scaler,
+    global_gradient_norm,
     resolve_device,
     resolve_precision,
     restore_rng_state,
+    update_ema,
 )
 
 
@@ -81,6 +83,19 @@ class RunPaths:
     resolved_config: Path
     report: Path
     crash_report: Path
+
+
+@dataclass(frozen=True)
+class SpatialTrainStepResult:
+    """Loss components and optimizer state for one physical batch."""
+
+    loss: float
+    charbonnier_loss: float
+    rms_log_ratio_loss: float
+    gradient_norm: float
+    did_optimizer_step: bool
+    scaler_scale_before: float | None
+    scaler_scale_after: float | None
 
 
 class MagnitudePatchDataset(Dataset[dict[str, Any]]):
@@ -180,8 +195,28 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("E004 requires the E003 Echo-RMS log-magnitude representation")
     if optimization.get("optimizer", "").lower() != "adam":
         raise ValueError("E004 uses Adam")
-    if optimization.get("loss") != "magnitude_charbonnier":
-        raise ValueError("E004 uses magnitude Charbonnier loss")
+    loss_name = optimization.get("loss")
+    supported_losses = {
+        "magnitude_charbonnier",
+        "magnitude_charbonnier_plus_linear_rms_log_ratio",
+    }
+    if loss_name not in supported_losses:
+        raise ValueError(f"unsupported optimization.loss: {loss_name!r}")
+    rms_log_ratio_weight = float(optimization.get("linear_rms_log_ratio_weight", 0.0))
+    if not math.isfinite(rms_log_ratio_weight) or rms_log_ratio_weight < 0:
+        raise ValueError("linear_rms_log_ratio_weight must be finite and non-negative")
+    if loss_name == "magnitude_charbonnier" and rms_log_ratio_weight != 0.0:
+        raise ValueError("plain magnitude Charbonnier requires zero RMS-ratio weight")
+    if (
+        loss_name == "magnitude_charbonnier_plus_linear_rms_log_ratio"
+        and rms_log_ratio_weight <= 0.0
+    ):
+        raise ValueError("energy-preserving loss requires a positive RMS-ratio weight")
+    for name in ("linear_rms_epsilon", "linear_rms_max_log_value"):
+        if name in optimization:
+            value = float(optimization[name])
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"optimization.{name} must be finite and positive")
     if optimization.get("learning_rate_schedule") != "constant":
         raise ValueError("E004 keeps the E003 constant learning rate")
     if int(optimization.get("total_steps", 0)) <= 0:
@@ -253,12 +288,118 @@ def resolved_config(
 ) -> dict[str, Any]:
     result = copy.deepcopy(config)
     result["schema_version"] = 1
-    result["experiment"] = "E004-D002-spatial-holdout-magnitude"
+    result["experiment"] = config.get(
+        "experiment", "E004-D002-spatial-holdout-magnitude"
+    )
     result["config_file"] = str(args.config.resolve())
     result["data"]["echo_dir"] = str(args.echo_dir.resolve())
     result["data"]["image_dir"] = str(args.image_dir.resolve())
     result["runtime"]["precision"] = precision.as_dict()
     return result
+
+
+def linear_magnitude_rms_log_ratio_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    epsilon: float = 1.0e-6,
+    max_log_value: float = 20.0,
+) -> torch.Tensor:
+    """Penalize multiplicative RMS bias after returning to linear magnitude."""
+
+    if prediction.shape != target.shape:
+        raise ValueError("prediction and target shapes must match")
+    if prediction.ndim != 4 or prediction.shape[1] != 1:
+        raise ValueError(
+            f"magnitude tensors must have shape [B, 1, H, W], got {tuple(prediction.shape)}"
+        )
+    if not math.isfinite(epsilon) or epsilon <= 0:
+        raise ValueError("epsilon must be finite and positive")
+    if not math.isfinite(max_log_value) or max_log_value <= 0:
+        raise ValueError("max_log_value must be finite and positive")
+
+    prediction_magnitude = torch.expm1(
+        prediction.float().clamp(min=0.0, max=max_log_value)
+    )
+    target_magnitude = torch.expm1(target.float().clamp(min=0.0, max=max_log_value))
+    spatial_dims = tuple(range(1, prediction.ndim))
+    prediction_rms = torch.sqrt(
+        prediction_magnitude.square().mean(dim=spatial_dims) + epsilon**2
+    )
+    target_rms = torch.sqrt(
+        target_magnitude.square().mean(dim=spatial_dims) + epsilon**2
+    )
+    return torch.abs(torch.log((prediction_rms + epsilon) / (target_rms + epsilon))).mean()
+
+
+def train_spatial_magnitude_step(
+    model: torch.nn.Module,
+    ema_model: torch.nn.Module,
+    optimizer: Adam,
+    scheduler: LambdaLR,
+    scaler: torch.cuda.amp.GradScaler,
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    device: torch.device,
+    precision: PrecisionPolicy,
+    loss_epsilon: float,
+    rms_log_ratio_weight: float,
+    rms_epsilon: float,
+    max_log_value: float,
+    ema_decay: float,
+) -> SpatialTrainStepResult:
+    """Run one update with the pre-registered E004 or E005 objective."""
+
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    device_inputs = inputs.to(device, non_blocking=device.type == "cuda")
+    device_targets = targets.to(device, non_blocking=device.type == "cuda")
+    with precision.autocast():
+        predictions = model(device_inputs)
+    charbonnier = magnitude_charbonnier_loss(predictions, device_targets, loss_epsilon)
+    rms_log_ratio = linear_magnitude_rms_log_ratio_loss(
+        predictions,
+        device_targets,
+        epsilon=rms_epsilon,
+        max_log_value=max_log_value,
+    )
+    loss = charbonnier + rms_log_ratio_weight * rms_log_ratio
+    if not bool(torch.isfinite(loss)):
+        raise FloatingPointError("non-finite loss encountered during training")
+
+    loss_value = float(loss.detach().item())
+    charbonnier_value = float(charbonnier.detach().item())
+    rms_log_ratio_value = float(rms_log_ratio.detach().item())
+    if precision.uses_grad_scaler:
+        scale_before = float(scaler.get_scale())
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        gradient_norm = global_gradient_norm(model.parameters())
+        scaler.step(optimizer)
+        scaler.update()
+        scale_after = float(scaler.get_scale())
+        did_optimizer_step = scale_after >= scale_before
+    else:
+        loss.backward()
+        gradient_norm = global_gradient_norm(model.parameters())
+        optimizer.step()
+        scale_before = None
+        scale_after = None
+        did_optimizer_step = True
+
+    if did_optimizer_step:
+        scheduler.step()
+        update_ema(ema_model, model, ema_decay)
+    return SpatialTrainStepResult(
+        loss=loss_value,
+        charbonnier_loss=charbonnier_value,
+        rms_log_ratio_loss=rms_log_ratio_value,
+        gradient_norm=gradient_norm,
+        did_optimizer_step=did_optimizer_step,
+        scaler_scale_before=scale_before,
+        scaler_scale_after=scale_after,
+    )
 
 
 def summarize_metrics(per_sample: dict[str, dict[str, float]]) -> dict[str, Any]:
@@ -615,6 +756,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     scheduler = LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
     scaler = make_grad_scaler(precision)
     loss_epsilon = float(optimization["charbonnier_epsilon"])
+    rms_log_ratio_weight = float(
+        optimization.get("linear_rms_log_ratio_weight", 0.0)
+    )
+    linear_rms_epsilon = float(optimization.get("linear_rms_epsilon", 1.0e-6))
+    linear_rms_max_log_value = float(
+        optimization.get("linear_rms_max_log_value", 20.0)
+    )
 
     logger.info("computing Echo identity baseline on %s validation patches", len(validation_dataset))
     identity_summary = evaluate_validation(
@@ -736,7 +884,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             sampler.set_position(epoch, sample_offset)
             for batch in train_loader:
                 while True:
-                    result = train_magnitude_step(
+                    result = train_spatial_magnitude_step(
                         model,
                         ema_model,
                         optimizer,
@@ -747,6 +895,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         device=device,
                         precision=precision,
                         loss_epsilon=loss_epsilon,
+                        rms_log_ratio_weight=rms_log_ratio_weight,
+                        rms_epsilon=linear_rms_epsilon,
+                        max_log_value=linear_rms_max_log_value,
                         ema_decay=float(optimization["ema_decay"]),
                     )
                     if result.did_optimizer_step:
@@ -771,6 +922,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                             "step": global_step,
                             "split": "train",
                             "loss": result.loss,
+                            "charbonnier_loss": result.charbonnier_loss,
+                            "linear_rms_log_ratio_loss": result.rms_log_ratio_loss,
+                            "linear_rms_log_ratio_weight": rms_log_ratio_weight,
                             "gradient_norm": result.gradient_norm,
                             "learning_rate": float(optimizer.param_groups[0]["lr"]),
                             "epoch": epoch,
@@ -778,11 +932,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         },
                     )
                     logger.info(
-                        "train step=%s epoch=%s offset=%s loss=%.6f grad_norm=%.4f",
+                        "train step=%s epoch=%s offset=%s loss=%.6f "
+                        "charb=%.6f rms_log_ratio=%.6f grad_norm=%.4f",
                         global_step,
                         epoch,
                         sample_offset,
                         result.loss,
+                        result.charbonnier_loss,
+                        result.rms_log_ratio_loss,
                         result.gradient_norm,
                     )
                 if global_step % int(runtime["validation_interval_steps"]) == 0:
