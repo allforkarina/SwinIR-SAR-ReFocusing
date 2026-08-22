@@ -118,3 +118,21 @@ E004 证明局部 `512×512` Echo 幅度包含可迁移到同场景未见区域�
 
 因此下一步不增加上下文、不扩大模型，也不延长已经平台化的训练；E005 只增加一个与
 失败判据直接对应的线性幅度 RMS 约束，继续使用相同划分、初始化、网络和评估协议。
+
+## 最佳 checkpoint 人工审查
+
+`scripts/visualize_spatial_holdout_checkpoint.py` 从 `best.pt` 中读取 raw model 和最佳验证
+步的逐样本指标，只在441个 validation patch 中进行确定性抽样。默认12个样本包括
+RMSE、RMS ratio、相关性和 SSIM 的高低端与中位样本，并补入空间分散样本，避免只挑选
+视觉效果较好的结果。
+
+每个样本输出一张 `2×3` 图：
+
+- 上排对 Echo、prediction、Image 分别按各自峰值归一化，用于观察轮廓和结构；
+- 下排三者统一按 Image 峰值缩放，用于观察绝对相对幅度和能量压缩；
+- 标题同时报告模型与 Echo identity 的 RMSE、相关性、RMS ratio、PSNR 和 SSIM；
+- `audit_manifest.json` 记录选择原因、坐标、重算指标和 checkpoint 原始指标。
+
+人工审查时应分别回答：预测是否保留正确轮廓、是否比 Echo 更接近 Image、是否产生虚假
+亮点或过度平滑，以及共享尺度下预测是否整体偏暗。上排只能证明结构相似，不能用来否定
+E004 已测得的幅度压缩。
