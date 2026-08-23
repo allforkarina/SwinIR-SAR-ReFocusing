@@ -67,6 +67,10 @@ E007不训练神经网络，而是让每个样本直接使用自己的Image标�
 - `audit/audit_page_*.png`：方便快速检查的共享Image峰值contact sheet；
 - `oracle_selection.json`、`split_manifest.json`和`resolved_config.json`：复现实验契约。
 
+脚本每隔一个进度区间更新`phase_fits.json`。若指标汇总或绘图阶段中断，可以在修复问题后
+对同一输出目录增加`--resume`：脚本会校验数据集fingerprint、oracle样本清单和缓存完整性，
+复用已完成的相位拟合，仅重算指标与图片。缓存不匹配时会拒绝恢复，避免混用实验状态。
+
 ## 本轮停止条件
 
 E007只回答“相位补偿的上限和阶数”，不训练系数预测器。必须先拿到服务器指标和人工审查

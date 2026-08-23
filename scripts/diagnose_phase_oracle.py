@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import math
 import sys
 from dataclasses import asdict, dataclass
@@ -83,6 +84,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--echo-dir", type=Path, required=True)
     parser.add_argument("--image-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume an interrupted run from a complete phase_fits.json cache. "
+            "The dataset fingerprint and oracle selection must match."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -605,10 +614,9 @@ def export_phase_diagnostics(
     axes[0, 0].set_title("Fitted linear phase coefficients")
     axes[0, 0].set_xlabel("row-frequency coefficient")
     axes[0, 0].set_ylabel("col-frequency coefficient")
-    axes[0, 1].boxplot(
-        [coefficients[:, index] for index in (3, 4, 5)],
-        labels=["fr²", "fr fc", "fc²"],
-    )
+    axes[0, 1].boxplot([coefficients[:, index] for index in (3, 4, 5)])
+    axes[0, 1].set_xticks([1, 2, 3])
+    axes[0, 1].set_xticklabels(["fr²", "fr fc", "fc²"])
     axes[0, 1].set_title("Quadratic phase coefficients")
     axes[1, 0].scatter(losses[:, 0], losses[:, 1], s=18, alpha=0.7)
     limit = max(float(losses.max()), np.finfo(np.float64).eps)
@@ -638,14 +646,106 @@ def _resolved_config(
     return result
 
 
+def _load_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"resume file does not exist: {path}")
+    with path.open(encoding="utf-8") as file:
+        payload = json.load(file)
+    if not isinstance(payload, dict):
+        raise ValueError(f"resume file must contain a JSON object: {path}")
+    return payload
+
+
+def _phase_fit_from_json(payload: dict[str, Any]) -> PhaseFit:
+    return PhaseFit(
+        coefficients=tuple(float(value) for value in payload["coefficients"]),  # type: ignore[arg-type]
+        initial_objective=float(payload["initial_objective"]),
+        final_objective=float(payload["final_objective"]),
+        optimizer_success=bool(payload["optimizer_success"]),
+        optimizer_status=int(payload["optimizer_status"]),
+        optimizer_message=str(payload["optimizer_message"]),
+        optimizer_iterations=int(payload["optimizer_iterations"]),
+        initial_shift=tuple(int(value) for value in payload["initial_shift"]),  # type: ignore[arg-type]
+        selected_frequency_count=int(payload["selected_frequency_count"]),
+    )
+
+
+def _write_phase_fit_cache(
+    path: Path,
+    phase_fits: dict[str, PhaseFit],
+    oracle_metadata: dict[str, dict[str, Any]],
+) -> None:
+    write_json(
+        path,
+        {
+            "model": "c0+c1*fr+c2*fc+c3*fr^2+c4*fr*fc+c5*fc^2",
+            "fits": {
+                name: {**asdict(fit), **oracle_metadata.get(name, {})}
+                for name, fit in phase_fits.items()
+            },
+        },
+    )
+
+
+def load_resume_cache(
+    output_dir: Path,
+    manifest: DatasetManifest,
+    oracle_records: Sequence[PairRecord],
+) -> tuple[dict[str, PhaseFit], dict[str, dict[str, Any]]]:
+    resolved = _load_json(output_dir / "resolved_config.json")
+    cached_fingerprint = resolved.get("data", {}).get("manifest_fingerprint")
+    if cached_fingerprint != manifest.fingerprint:
+        raise RuntimeError(
+            "resume dataset fingerprint does not match the interrupted run"
+        )
+    selection = _load_json(output_dir / "oracle_selection.json")
+    cached_names = [sample.get("filename") for sample in selection.get("samples", [])]
+    expected_names = [record.echo_path.name for record in oracle_records]
+    if cached_names != expected_names:
+        raise RuntimeError("resume oracle sample selection does not match")
+    cache = _load_json(output_dir / "phase_fits.json")
+    raw_fits = cache.get("fits")
+    if not isinstance(raw_fits, dict):
+        raise ValueError("phase_fits.json is missing the fits mapping")
+    missing = sorted(set(expected_names) - set(raw_fits))
+    unexpected = sorted(set(raw_fits) - set(expected_names))
+    if missing or unexpected:
+        raise RuntimeError(
+            "resume phase-fit cache is incomplete or inconsistent: "
+            f"missing={missing[:5]} unexpected={unexpected[:5]}"
+        )
+    phase_fits = {
+        name: _phase_fit_from_json(raw_fits[name]) for name in expected_names
+    }
+    metadata = {
+        name: {
+            key: raw_fits[name][key]
+            for key in (
+                "shift",
+                "shift_gain",
+                "quadratic_gain",
+                "unrestricted_gain",
+            )
+            if key in raw_fits[name]
+        }
+        for name in expected_names
+    }
+    return phase_fits, metadata
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     config = load_config(args.config)
     validate_config(config)
     if not args.echo_dir.is_dir() or not args.image_dir.is_dir():
         raise FileNotFoundError("Echo and Image directories must both exist")
-    if args.output_dir.exists():
+    resume = bool(getattr(args, "resume", False))
+    if args.output_dir.exists() and not resume:
         raise FileExistsError(
             f"output directory already exists: {args.output_dir}; choose a new directory"
+        )
+    if resume and not args.output_dir.is_dir():
+        raise FileNotFoundError(
+            f"resume output directory does not exist: {args.output_dir}"
         )
     data = config["data"]
     phase = config["phase"]
@@ -669,25 +769,37 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         flush=True,
     )
 
-    args.output_dir.mkdir(parents=True)
-    write_json(args.output_dir / "resolved_config.json", _resolved_config(config, args, manifest))
-    manifest.write_json(args.output_dir / "split_manifest.json")
-    write_json(
-        args.output_dir / "oracle_selection.json",
-        {
-            "sample_count": len(oracle_records),
-            "selection": "deterministic spatial grid over validation only",
-            "target_usage": "per-sample diagnostic oracle; not a trainable or deployable estimator",
-            "samples": [
-                {"filename": record.echo_path.name, "row": record.row, "col": record.col}
-                for record in oracle_records
-            ],
-        },
-    )
+    if resume:
+        phase_fits, oracle_metadata = load_resume_cache(
+            args.output_dir, manifest, oracle_records
+        )
+        print(
+            f"resume loaded {len(phase_fits)}/{len(oracle_records)} cached phase fits",
+            flush=True,
+        )
+    else:
+        args.output_dir.mkdir(parents=True)
+        phase_fits = {}
+        oracle_metadata = {}
+        write_json(
+            args.output_dir / "resolved_config.json",
+            _resolved_config(config, args, manifest),
+        )
+        manifest.write_json(args.output_dir / "split_manifest.json")
+        write_json(
+            args.output_dir / "oracle_selection.json",
+            {
+                "sample_count": len(oracle_records),
+                "selection": "deterministic spatial grid over validation only",
+                "target_usage": "per-sample diagnostic oracle; not a trainable or deployable estimator",
+                "samples": [
+                    {"filename": record.echo_path.name, "row": record.row, "col": record.col}
+                    for record in oracle_records
+                ],
+            },
+        )
 
     metric_maps: dict[str, dict[str, dict[str, float]]] = {method: {} for method in METHODS}
-    phase_fits: dict[str, PhaseFit] = {}
-    oracle_metadata: dict[str, dict[str, Any]] = {}
     floor_db = float(evaluation["log_magnitude_floor_db"])
     radius = float(evaluation["high_frequency_radius_fraction"])
     for index, record in enumerate(oracle_records, start=1):
@@ -697,21 +809,29 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         shift_prediction, shift, shift_gain = shift_oracle(
             echo, image, int(phase["maximum_shift_pixels"])
         )
-        quadratic_prediction, fit, quadratic_gain = quadratic_phase_oracle(
-            echo,
-            image,
-            fft_norm=str(phase["fft_norm"]),
-            maximum_shift=int(phase["maximum_shift_pixels"]),
-            maximum_frequency_samples=int(phase["maximum_frequency_samples"]),
-            quadratic_bound=float(phase["quadratic_coefficient_bound_radians"]),
-            maximum_iterations=int(phase["optimizer_max_iterations"]),
-            ftol=float(phase["optimizer_ftol"]),
-            gtol=float(phase["optimizer_gtol"]),
-        )
+        filename = record.echo_path.name
+        if filename in phase_fits:
+            fit = phase_fits[filename]
+            quadratic_prediction = apply_phase_polynomial(
+                echo, fit.coefficients, fft_norm=str(phase["fft_norm"])
+            )
+            quadratic_gain = optimal_complex_gain(quadratic_prediction, image)
+            quadratic_prediction *= quadratic_gain
+        else:
+            quadratic_prediction, fit, quadratic_gain = quadratic_phase_oracle(
+                echo,
+                image,
+                fft_norm=str(phase["fft_norm"]),
+                maximum_shift=int(phase["maximum_shift_pixels"]),
+                maximum_frequency_samples=int(phase["maximum_frequency_samples"]),
+                quadratic_bound=float(phase["quadratic_coefficient_bound_radians"]),
+                maximum_iterations=int(phase["optimizer_max_iterations"]),
+                ftol=float(phase["optimizer_ftol"]),
+                gtol=float(phase["optimizer_gtol"]),
+            )
         unrestricted_prediction, unrestricted_gain = unrestricted_phase_oracle(
             echo, image, fft_norm=str(phase["fft_norm"])
         )
-        filename = record.echo_path.name
         phase_fits[filename] = fit
         oracle_metadata[filename] = {
             "shift": list(shift),
@@ -733,7 +853,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
         interval = int(runtime["progress_interval_samples"])
         if index % interval == 0 or index == len(oracle_records):
-            print(f"oracle {index}/{len(oracle_records)}", flush=True)
+            _write_phase_fit_cache(
+                args.output_dir / "phase_fits.json", phase_fits, oracle_metadata
+            )
+            source = "cached" if resume else "fitted"
+            print(f"oracle {index}/{len(oracle_records)} phase={source}", flush=True)
 
     summaries = {method: summarize_metrics(values) for method, values in metric_maps.items()}
     comparison = compare_oracles(
@@ -748,15 +872,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     else:
         status = "phase_only_oracle_supported_quadratic_not_supported"
 
-    write_json(
-        args.output_dir / "phase_fits.json",
-        {
-            "model": "c0+c1*fr+c2*fc+c3*fr^2+c4*fr*fc+c5*fc^2",
-            "fits": {
-                name: {**asdict(fit), **oracle_metadata[name]}
-                for name, fit in phase_fits.items()
-            },
-        },
+    _write_phase_fit_cache(
+        args.output_dir / "phase_fits.json", phase_fits, oracle_metadata
     )
     export_phase_diagnostics(
         phase_fits,
@@ -770,7 +887,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     audit_dir = args.output_dir / "audit"
     sample_dir = audit_dir / "samples"
-    sample_dir.mkdir(parents=True)
+    sample_dir.mkdir(parents=True, exist_ok=True)
     records_by_name = {record.echo_path.name: record for record in oracle_records}
     contact_rows = []
     page_size = int(runtime["contact_sheet_page_size"])

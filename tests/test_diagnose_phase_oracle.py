@@ -7,6 +7,7 @@ import numpy as np
 import yaml
 from scipy.io import savemat
 
+import scripts.diagnose_phase_oracle as phase_oracle_module
 from scripts.diagnose_phase_oracle import (
     apply_phase_polynomial,
     estimate_magnitude_shift,
@@ -96,7 +97,9 @@ def test_quadratic_phase_fit_reduces_circular_objective() -> None:
     assert coherence > 0.999999999
 
 
-def test_tiny_end_to_end_run_writes_report_and_audit(tmp_path: Path) -> None:
+def test_tiny_end_to_end_run_writes_report_audit_and_resumes(
+    tmp_path: Path, monkeypatch
+) -> None:
     echo_dir = tmp_path / "echo"
     image_dir = tmp_path / "image"
     echo_dir.mkdir()
@@ -188,3 +191,32 @@ def test_tiny_end_to_end_run_writes_report_and_audit(tmp_path: Path) -> None:
     assert (output_dir / "phase_diagnostics.png").is_file()
     assert (output_dir / "audit" / "audit_page_001.png").is_file()
     assert len(tuple((output_dir / "audit" / "samples").glob("*.png"))) == 1
+
+    def fail_if_refit(*args, **kwargs):
+        raise AssertionError("resume must not refit cached quadratic phase")
+
+    monkeypatch.setattr(
+        phase_oracle_module, "fit_quadratic_phase", fail_if_refit
+    )
+    resumed = run(
+        argparse.Namespace(
+            config=config_path,
+            echo_dir=echo_dir,
+            image_dir=image_dir,
+            output_dir=output_dir,
+            resume=True,
+        )
+    )
+
+    assert resumed["status"] == report["status"]
+    assert resumed["comparison"]["quadratic_phase"]["metric_supported"] is True
+    assert np.isclose(
+        resumed["comparison"]["quadratic_phase"][
+            "mean_log_ssim_delta_vs_echo"
+        ],
+        report["comparison"]["quadratic_phase"][
+            "mean_log_ssim_delta_vs_echo"
+        ],
+        rtol=1.0e-12,
+        atol=1.0e-15,
+    )
