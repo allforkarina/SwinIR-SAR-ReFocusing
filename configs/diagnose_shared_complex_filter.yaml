@@ -1,0 +1,35 @@
+# E006: test whether one shared complex image-domain convolution explains Scene4.
+experiment: E006-D001-shared-complex-frequency-filter
+
+data:
+  expected_shape: [512, 512]
+  rms_epsilon: 1.0e-12
+  validation_region: {row_min: 16400, row_max: 18400, col_min: 7700, col_max: 9700}
+  guard_region: {row_min: 15888, row_max: 18912, col_min: 7188, col_max: 10212}
+  expected_split_counts: {train: 15714, guard: 520, validation: 441}
+  fit_min_coordinate_spacing: 512
+  fit_max_samples: 256
+
+filter:
+  fft_norm: ortho
+  ridge_fraction_of_mean_power: 1.0e-3
+
+evaluation:
+  log_magnitude_floor_db: -60.0
+  high_frequency_radius_fraction: 0.25
+  audit_sample_count: 12
+  success_criteria:
+    validation_rmse_win_fraction_vs_echo_min: 0.75
+    validation_rmse_win_fraction_vs_gain_min: 0.60
+    mean_complex_coherence_delta_vs_echo_min: 0.02
+    mean_log_ssim_delta_vs_echo_min: 0.05
+    mean_edge_correlation_delta_vs_echo_min: 0.05
+    mean_edge_correlation_delta_vs_gain_min: 0.02
+    median_high_frequency_energy_ratio_min: 0.75
+    median_high_frequency_energy_ratio_max: 1.25
+    fit_weighted_transfer_coherence_min: 0.50
+
+runtime:
+  progress_interval_samples: 32
+  figure_dpi: 160
+  contact_sheet_page_size: 12
