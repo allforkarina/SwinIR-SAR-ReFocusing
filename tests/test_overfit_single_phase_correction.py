@@ -11,6 +11,7 @@ from scipy.io import savemat
 
 from scripts.overfit_single_phase_correction import (
     PhaseSuccessCriteria,
+    _gain_fraction,
     apply_phase_correction,
     normalize_phasor,
     phase_loss_components,
@@ -111,6 +112,12 @@ def test_phase_success_criteria_require_every_metric() -> None:
         else:
             failing[name] = 0.0
         assert not criteria.is_satisfied(failing), name
+
+
+def test_gain_fraction_handles_non_positive_oracle_gain() -> None:
+    assert _gain_fraction(0.2, 0.3, 0.25) == pytest.approx(0.0)
+    assert _gain_fraction(0.25, 0.3, 0.25) == pytest.approx(1.0)
+    assert _gain_fraction(0.4, 0.3, 0.5) == pytest.approx(0.5)
 
 
 def _write_tiny_config(path: Path) -> None:

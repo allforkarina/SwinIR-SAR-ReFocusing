@@ -242,7 +242,11 @@ def _weighted_phase_alignment(
 
 def _gain_fraction(candidate: float, baseline: float, oracle: float) -> float:
     oracle_gain = oracle - baseline
-    return (candidate - baseline) / oracle_gain if oracle_gain > 0 else 0.0
+    if oracle_gain > 1.0e-12:
+        return (candidate - baseline) / oracle_gain
+    # A non-positive oracle gain has no meaningful positive fraction. Matching
+    # or exceeding that oracle is sufficient; otherwise the criterion fails.
+    return 1.0 if candidate + 1.0e-12 >= oracle else 0.0
 
 
 def evaluate_correction(
@@ -477,6 +481,7 @@ def save_artifacts(
     scale: float,
     floor_db: float,
     metrics: dict[str, dict[str, float]],
+    experiment_label: str = "E008",
 ) -> None:
     arrays = tuple(
         tensor_to_complex(values)
@@ -512,7 +517,7 @@ def save_artifacts(
     axes[1, 0].set_ylabel("Shared Image peak")
     raw = metrics["raw"]
     figure.suptitle(
-        f"E008 step={step} phase alignment={raw['weighted_phase_alignment']:.4f} "
+        f"{experiment_label} step={step} phase alignment={raw['weighted_phase_alignment']:.4f} "
         f"coherence={raw['complex_coherence']:.4f} SSIM={raw['log_magnitude_ssim']:.4f} "
         f"edge={raw['edge_correlation']:.4f} oracle RMSE gap={raw['rmse_excess_over_oracle']:.4f}",
         fontsize=10,

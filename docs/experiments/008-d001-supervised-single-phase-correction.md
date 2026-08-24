@@ -2,7 +2,7 @@
 
 > 日期：2026-08-24
 >
-> 状态：代码完成，等待服务器训练
+> 状态：实验通过
 >
 > 前置实验：[E007逐样本相位Oracle](007-d001-per-patch-phase-oracle.md)
 
@@ -82,3 +82,27 @@ Echo、Raw、EMA、Oracle、Image五列显示独立峰值和共享Image峰值两
 - `figures/step_*.png`五列人工审查图；
 - `predictions/step_*.mat`，包含预测图和预测单位相位校正；
 - `resolved_config.json`，明确记录推理时Image不可用。
+
+## 服务器结果与人工审查（2026-08-24）
+
+锚点`patch_row_17500_col_9400_2.mat`在step 2000达到连续三次Raw通过并提前停止：
+
+| 指标 | Echo | Oracle | Raw |
+| --- | ---: | ---: | ---: |
+| normalized complex RMSE | 1.0013 | 0.4477 | 0.4605 |
+| complex coherence | 0.0060 | 0.8003 | 0.7887 |
+| log-magnitude SSIM | 0.0504 | 0.3000 | 0.3863 |
+| edge correlation | 0.0012 | 0.1978 | 0.2511 |
+| high-frequency ratio | 0.9375 | 1.0356 | 0.9953 |
+| weighted phase alignment | 0.0008 | 1.0000 | 0.9781 |
+
+Raw达到Oracle coherence的98.55%，RMSE只比Oracle高0.0128；SSIM和edge gain分别达到
+Oracle增益的134.59%和127.15%。逐步可视化显示道路、地块边界和散射结构从step 500
+开始出现，step 2000的Raw已与Oracle具有一致的聚焦形态。项目组人工审查接受该结果。
+
+EMA因固定`0.999`衰减且训练仅2000步而明显滞后，不作为本实验失败证据。E009将保留
+Raw主判据，并对EMA增加早期无偏预热。
+
+本实验只证明网络可以在一个训练样本上记忆监督相位校正。尽管前向接口只读取Echo，
+模型参数已经编码该样本的Image信息，因此不能作为未见样本推理证据。下一步进入E009
+16样本联合过拟合，检验一个共享模型能否同时学习多组内容条件相位映射。
