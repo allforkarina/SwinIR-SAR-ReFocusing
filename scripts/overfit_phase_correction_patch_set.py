@@ -328,6 +328,7 @@ def save_representative_artifacts(
     metrics: dict[str, dict[str, Any]],
     anchor_filename: str,
     floor_db: float,
+    experiment_label: str = "E009",
 ) -> list[str]:
     raw_summary = metrics["raw"]
     filenames = list(
@@ -347,6 +348,7 @@ def save_representative_artifacts(
         metrics=metrics,
         filenames=filenames,
         floor_db=floor_db,
+        experiment_label=experiment_label,
     )
     return filenames
 
@@ -360,6 +362,7 @@ def save_named_artifacts(
     metrics: dict[str, dict[str, Any]],
     filenames: Sequence[str],
     floor_db: float,
+    experiment_label: str = "E009",
 ) -> None:
     by_name = {sample.filename: sample for sample in samples}
     for filename in filenames:
@@ -383,7 +386,7 @@ def save_named_artifacts(
                 "raw": metrics["raw"]["per_sample"][filename],
                 "ema": metrics["ema"]["per_sample"][filename],
             },
-            experiment_label="E009",
+            experiment_label=experiment_label,
         )
 
 
@@ -456,6 +459,7 @@ def make_resolved_config(
     manifest: dict[str, Any],
     precision: PrecisionPolicy,
     criteria: PhaseSuccessCriteria,
+    experiment: str = "E009-D002-joint-phase-correction-patch-set",
 ) -> dict[str, Any]:
     model = dict(base["model"])
     model["in_chans"] = 2
@@ -471,7 +475,7 @@ def make_resolved_config(
     )
     return {
         "schema_version": 1,
-        "experiment": "E009-D002-joint-phase-correction-patch-set",
+        "experiment": experiment,
         "base_config": str(args.config.resolve()),
         "selection_manifest": manifest,
         "model": model,
@@ -529,7 +533,14 @@ def validate_args(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"resume checkpoint does not exist: {args.resume}")
 
 
-def run(args: argparse.Namespace) -> dict[str, Any]:
+def run(
+    args: argparse.Namespace,
+    *,
+    candidate_pairs: Sequence[DiscoveredPair] | None = None,
+    selection_metadata: dict[str, Any] | None = None,
+    experiment: str = "E009-D002-joint-phase-correction-patch-set",
+    experiment_label: str = "E009",
+) -> dict[str, Any]:
     validate_args(args)
     criteria = PhaseSuccessCriteria(
         weighted_phase_alignment_min=args.success_phase_alignment,
@@ -543,7 +554,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     criteria.validate()
     base = load_base_config(args.config)
     expected_shape = tuple(int(value) for value in base["data"]["expected_shape"])
-    pairs = discover_pairs(args.echo_dir, args.image_dir)
+    pairs = (
+        discover_pairs(args.echo_dir, args.image_dir)
+        if candidate_pairs is None
+        else tuple(candidate_pairs)
+    )
     selected_pairs = select_spatially_distributed_pairs(
         pairs,
         sample_count=int(args.sample_count),
@@ -564,6 +579,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         patch_shape=expected_shape,
         anchor_filename=args.anchor_filename,
     )
+    if selection_metadata is not None:
+        overlapping = set(manifest) & set(selection_metadata)
+        if overlapping:
+            raise ValueError(
+                "selection metadata cannot replace core manifest fields: "
+                f"{sorted(overlapping)}"
+            )
+        manifest.update(selection_metadata)
     device = resolve_device(args.device)
     precision = resolve_precision(device)
     resolved = make_resolved_config(
@@ -572,6 +595,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         manifest=manifest,
         precision=precision,
         criteria=criteria,
+        experiment=experiment,
     )
     paths = make_run_paths(args.output_dir, resuming=args.resume is not None)
     manifest_path = paths.root / "selected_samples.json"
@@ -586,7 +610,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if existing != resolved:
             raise RuntimeError("output directory resolved_config.json does not match")
 
-    print("selected E009 phase patch set:", flush=True)
+    print(f"selected {experiment_label} phase patch set:", flush=True)
     for index, sample in enumerate(samples):
         marker = " anchor" if sample.filename == args.anchor_filename else ""
         print(
@@ -739,6 +763,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 metrics={"raw": last_metrics["raw"], "ema": last_metrics["ema"]},
                 anchor_filename=args.anchor_filename,
                 floor_db=float(evaluation["log_magnitude_floor_db"]),
+                experiment_label=experiment_label,
             )
         overflow_streak = 0
         while step < args.steps and success_step is None:
@@ -788,6 +813,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     metrics={"raw": last_metrics["raw"], "ema": last_metrics["ema"]},
                     anchor_filename=args.anchor_filename,
                     floor_db=float(evaluation["log_magnitude_floor_db"]),
+                    experiment_label=experiment_label,
                 )
                 save_checkpoint(paths.checkpoints / "latest.pt", **checkpoint_kwargs())
     except KeyboardInterrupt:
@@ -818,6 +844,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         metrics={"raw": last_metrics["raw"], "ema": last_metrics["ema"]},
         filenames=artifact_samples,
         floor_db=float(evaluation["log_magnitude_floor_db"]),
+        experiment_label=experiment_label,
     )
     save_checkpoint(paths.checkpoints / "final.pt", **checkpoint_kwargs())
     save_checkpoint(paths.checkpoints / "latest.pt", **checkpoint_kwargs())

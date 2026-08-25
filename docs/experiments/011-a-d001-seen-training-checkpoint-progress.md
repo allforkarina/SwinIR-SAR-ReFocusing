@@ -2,7 +2,7 @@
 
 > 日期：2026-08-25
 >
-> 状态：代码完成，等待服务器评测与人工审查
+> 状态：诊断完成（step 50000训练集仍无学习信号）
 >
 > 前置实验：[E010相位校正空间留出泛化门禁](010-d001-phase-spatial-holdout.md)
 
@@ -74,3 +74,25 @@ Echo | Initial prediction (step 0) | Final prediction (step 50000) | Oracle phas
 - `report.json`：两个checkpoint逐样本指标、集合统计、delta、检查项和诊断状态；
 - `samples/*.png`：五列双尺度代表样本；
 - `audit_012_training_samples.png`或分页联系表。
+
+## 服务器结果与人工审查（2026-08-25）
+
+在441个固定train probe上，step 50000相对step 0没有任何系统性改善：
+
+| 诊断量 | 结果 |
+| --- | ---: |
+| mean phase alignment变化 | -0.000038 |
+| median phase alignment变化 | -0.000037 |
+| mean Oracle coherence比例变化 | -0.000232 |
+| mean RMSE差距闭合比例变化 | -0.000029 |
+| final RMSE优于initial的样本比例 | 0.4898 |
+
+全部自动检查失败，状态为`training_signal_not_supported`。12个代表样本的final prediction也
+没有恢复Oracle和Image中的道路、边界或散射结构；共享Image峰值下主要呈现暗背景，独立尺度
+下仍只是无结构噪声。
+
+该结论只适用于E010在step 50000早停时的checkpoint。E010对15714个训练样本只执行50000
+次更新，平均约3.18 updates/sample；相比E009成功时约2500 updates/sample，训练曝光严重
+不足。因此E011-A证明的是“当前E010 checkpoint连训练probe也尚未学会”，不能推出充分训练
+后仍不可拟合。下一步不是用相同checkpoint重跑本审查，而是进入E011-B：在较小固定训练
+子集上禁用验证集早停并对齐每样本曝光量。
