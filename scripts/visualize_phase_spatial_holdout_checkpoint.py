@@ -78,12 +78,23 @@ def load_checkpoint(path: Path) -> dict[str, Any]:
     for key in ("model", "ema_model"):
         if not isinstance(checkpoint.get(key), dict):
             raise RuntimeError(f"checkpoint is missing {key} weights")
-    best = checkpoint.get("best_validation")
-    if not isinstance(best, dict):
-        raise RuntimeError("checkpoint is missing best_validation")
-    summary = best.get("summary")
+    global_step = checkpoint.get("global_step")
+    if not isinstance(global_step, int) or global_step < 0:
+        raise RuntimeError("checkpoint has an invalid global_step")
+    validation = checkpoint.get("last_validation")
+    if not isinstance(validation, dict):
+        raise RuntimeError("checkpoint is missing last_validation")
+    validation_step = validation.get("step")
+    if not isinstance(validation_step, int):
+        raise RuntimeError("checkpoint last_validation has an invalid step")
+    recorded_step = checkpoint.get("last_validation_step")
+    if validation_step != global_step or recorded_step != global_step:
+        raise RuntimeError(
+            "checkpoint weights and last_validation metrics are not from the same step"
+        )
+    summary = validation.get("summary")
     if not isinstance(summary, dict) or not isinstance(summary.get("per_sample"), dict):
-        raise RuntimeError("checkpoint is missing per-sample best validation metrics")
+        raise RuntimeError("checkpoint is missing per-sample last validation metrics")
     return checkpoint
 
 
@@ -257,7 +268,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     coordinates = {
         record.echo_path.name: (record.row, record.col) for record in validation_records
     }
-    stored = checkpoint["best_validation"]["summary"]["per_sample"]
+    validation = checkpoint["last_validation"]
+    stored = validation["summary"]["per_sample"]
     if args.selection == "all":
         selected = tuple(
             SelectedSample(name, ("all_validation",))
@@ -287,7 +299,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     model = SwinIR(**config["model"])
     model.load_state_dict(checkpoint["model" if args.weights == "raw" else "ema_model"])
     model.to(device).eval()
-    step = int(checkpoint["best_validation"]["step"])
+    step = int(checkpoint["global_step"])
     args.output_dir.mkdir(parents=True)
     samples_dir = args.output_dir / "samples"
     samples_dir.mkdir()
@@ -347,7 +359,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "selection_reasons": list(selection.reasons),
                 "figure": str(Path("samples") / name),
                 "metrics": metrics,
-                "stored_best_raw_metrics": stored[sample.filename],
+                "stored_last_validation_raw_metrics": stored[sample.filename],
             }
         )
         print(
@@ -379,6 +391,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "experiment": config["experiment"],
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_step": step,
+        "validation_source": "last_validation",
+        "validation_step": int(validation["step"]),
+        "selection_metric_weights": "raw",
         "weights": args.weights,
         "selection": args.selection,
         "sample_count": len(samples),

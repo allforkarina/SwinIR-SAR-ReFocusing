@@ -19,6 +19,7 @@ from scripts.train_phase_spatial_holdout import (
     run,
 )
 from scripts.visualize_phase_spatial_holdout_checkpoint import (
+    load_checkpoint,
     run as run_visualization,
 )
 from scripts.visualize_phase_spatial_holdout_checkpoint import select_representative
@@ -306,7 +307,7 @@ def test_tiny_cpu_run_resumes_and_exports_unseen_audit(tmp_path: Path) -> None:
     audit = tmp_path / "audit"
     visual = run_visualization(
         argparse.Namespace(
-            checkpoint=output / "checkpoints" / "best.pt",
+            checkpoint=output / "checkpoints" / "final.pt",
             echo_dir=echo_dir,
             image_dir=image_dir,
             output_dir=audit,
@@ -321,7 +322,20 @@ def test_tiny_cpu_run_resumes_and_exports_unseen_audit(tmp_path: Path) -> None:
 
     assert visual["sample_count"] == 1
     assert visual["validation_sample_count"] == 1
+    assert visual["checkpoint_step"] == 1
+    assert visual["validation_source"] == "last_validation"
+    assert visual["validation_step"] == 1
     assert (audit / "audit_001_validation_samples.png").is_file()
     assert len(tuple((audit / "samples").glob("*.png"))) == 1
     written = json.loads((audit / "audit_manifest.json").read_text(encoding="utf-8"))
     assert written["weights"] == "raw"
+    assert "stored_last_validation_raw_metrics" in written["samples"][0]
+
+    mismatched = torch.load(
+        output / "checkpoints" / "final.pt", map_location="cpu", weights_only=False
+    )
+    mismatched["last_validation"]["step"] = 0
+    mismatch_path = tmp_path / "mismatched.pt"
+    torch.save(mismatched, mismatch_path)
+    with pytest.raises(RuntimeError, match="not from the same step"):
+        load_checkpoint(mismatch_path)

@@ -80,8 +80,11 @@ oracle。Oracle仅作为离线性能上界，绝不输入模型。Raw在全部44
 - `metrics.jsonl`和`train.log`：训练及完整验证历史；
 - `checkpoints/best.pt`、`latest.pt`、`passed.pt`（仅通过时）、归档和中断checkpoint；
 - `report.json`：最佳/最终验证、完整逐样本指标、成功条件和推理契约；
-- 独立审查脚本从`best.pt`选择最差、最好、中位及空间分散样本，输出
-  Echo、Raw、Oracle、Image四列的独立峰值图和共享Image峰值图。
+- 独立审查脚本严格使用所选checkpoint的`last_validation`选择最差、最好、中位及空间分散
+  样本，输出Echo、Raw、Oracle、Image四列的独立峰值图和共享Image峰值图。checkpoint的
+  `global_step`、`last_validation_step`和`last_validation.step`必须完全一致，否则拒绝导出，
+  防止用当前权重搭配旧验证指标生成误导图。当`best.pt`停留在step 0时，应审查`final.pt`
+  或`latest.pt`，而不是继续审查随机初始化权重。
 
 ## 决策规则
 
