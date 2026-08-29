@@ -8,6 +8,7 @@ import yaml
 from scipy.io import savemat
 
 from scripts.overfit_phase_train_subset import EXPERIMENT, run
+from scripts.visualize_phase_train_subset_checkpoint import run as visualize_run
 
 
 def _phase_pair(shape: tuple[int, int], seed: int) -> tuple[np.ndarray, np.ndarray]:
@@ -152,3 +153,25 @@ def test_e011b_uses_only_train_records_and_writes_all_audits(tmp_path: Path) -> 
     assert len(report["artifacts"]["final_audit_samples"]) == 2
     assert len(list((output_dir / "figures").rglob("step_000002.png"))) == 2
     assert (output_dir / "checkpoints" / "latest.pt").is_file()
+
+    audit_dir = tmp_path / "audit"
+    audit = visualize_run(
+        argparse.Namespace(
+            checkpoint=output_dir / "checkpoints" / "best.pt",
+            echo_dir=echo_dir,
+            image_dir=image_dir,
+            output_dir=audit_dir,
+            device="cpu",
+            dpi=30,
+            contact_sheet_page_size=1,
+        )
+    )
+
+    assert audit["experiment"] == EXPERIMENT
+    assert audit["checkpoint_step"] == audit["stored_metrics_step"]
+    assert audit["sample_count"] == 2
+    assert len(audit["samples"]) == 2
+    assert len(audit["contact_sheets"]) == 2
+    assert len(list((audit_dir / "samples").glob("*.png"))) == 2
+    assert len(list((audit_dir / "contact_sheets").glob("*.png"))) == 2
+    assert (audit_dir / "audit_manifest.json").is_file()

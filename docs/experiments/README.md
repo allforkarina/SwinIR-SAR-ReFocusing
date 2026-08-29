@@ -48,6 +48,11 @@ checkpoint不是实验结论的唯一证据。每个运行应永久保留`report
 `.pt/.pth/.ckpt`，默认只预览；只有增加`--apply`才真正删除。它不会删除报告、日志、配置、
 图片或MAT预测。
 
+E011-B的可读`best.pt`可通过`scripts/visualize_phase_train_subset_checkpoint.py`
+重新导出完整训练子集审查结果。该入口验证checkpoint步数、保存指标、固定样本及其文件指纹
+一致后，输出每个样本的Echo、RAW、EMA、Oracle和Image双尺度对比图，按8个样本分页的
+共享Image峰值汇总图，以及包含现场重算指标的`audit_manifest.json`。
+
 ## 后续顺序
 
 1. 从E011-B的可读`best.pt(step 140800)`恢复并完成既定160000步预算；
