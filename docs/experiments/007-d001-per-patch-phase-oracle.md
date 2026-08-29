@@ -2,7 +2,7 @@
 
 > 日期：2026-08-24
 >
-> 状态：代码完成，等待服务器诊断
+> 状态：实验完成；unrestricted phase oracle获得支持，二次相位模型被否定
 >
 > 前置实验：[E006共享复数频域滤波器](006-d001-shared-complex-frequency-filter.md)
 

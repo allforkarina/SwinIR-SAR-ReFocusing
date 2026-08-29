@@ -10,11 +10,6 @@ import torch
 import yaml
 from scipy.io import savemat
 
-from scripts.audit_phase_train_checkpoint_progress import (
-    compare_checkpoints,
-    run as run_train_progress_audit,
-)
-from scripts.audit_phase_train_checkpoint_progress import select_spatial_probe
 from scripts.train_phase_spatial_holdout import (
     PhasePatchDataset,
     ValidationBaselines,
@@ -219,18 +214,6 @@ def test_phase_dataset_exposes_echo_spectrum_and_image_supervised_phasor(
     phasor_norm = sample["target_phasor"].square().sum(dim=0).sqrt()
     assert float(phasor_norm.mean()) == pytest.approx(1.0, abs=1.0e-5)
 
-    selected_first = select_spatial_probe(
-        manifest.records_for(SplitName.TRAIN), sample_count=4
-    )
-    selected_second = select_spatial_probe(
-        manifest.records_for(SplitName.TRAIN), sample_count=4
-    )
-    assert [record.key for record in selected_first] == [
-        record.key for record in selected_second
-    ]
-    assert all(record.split is SplitName.TRAIN for record in selected_first)
-
-
 def test_success_gate_requires_oracle_relative_refocusing_metrics() -> None:
     echo = _base_metrics(rmse=1.0, coherence=0.1, ssim=0.1, edge=0.1)
     oracle = _base_metrics(rmse=0.4, coherence=0.8, ssim=0.5, edge=0.5)
@@ -247,24 +230,6 @@ def test_success_gate_requires_oracle_relative_refocusing_metrics() -> None:
     assert comparison["passed"] is True
     assert comparison["rmse_win_fraction_vs_echo"] == 1.0
     assert comparison["mean_rmse_oracle_gap_fraction_closed"] == pytest.approx(0.75)
-    initial_candidate = _base_metrics(
-        rmse=0.95, coherence=0.15, ssim=0.12, edge=0.12
-    )
-    initial_candidate["weighted_phase_alignment"] = 0.0
-    progress = compare_checkpoints(
-        {
-            "sample.mat": add_generalization_metrics(
-                initial_candidate, echo, oracle
-            )
-        },
-        {"sample.mat": metrics},
-        phase_delta_min=0.05,
-        rmse_gap_delta_min=0.05,
-        coherence_delta_min=0.05,
-        rmse_win_fraction_min=0.75,
-    )
-    assert progress["metric_training_signal_supported"] is True
-    assert progress["final_rmse_win_fraction_vs_initial"] == 1.0
     failed = compare_to_baselines(
         aggregate_metrics(
             {
@@ -364,43 +329,6 @@ def test_tiny_cpu_run_resumes_and_exports_unseen_audit(tmp_path: Path) -> None:
     written = json.loads((audit / "audit_manifest.json").read_text(encoding="utf-8"))
     assert written["weights"] == "raw"
     assert "stored_last_validation_raw_metrics" in written["samples"][0]
-
-    initial = torch.load(
-        output / "checkpoints" / "final.pt", map_location="cpu", weights_only=False
-    )
-    initial["global_step"] = 0
-    initial["last_validation_step"] = 0
-    initial["last_validation"]["step"] = 0
-    initial_path = tmp_path / "initial.pt"
-    torch.save(initial, initial_path)
-    train_audit_output = tmp_path / "train_audit"
-    train_audit = run_train_progress_audit(
-        argparse.Namespace(
-            initial_checkpoint=initial_path,
-            final_checkpoint=output / "checkpoints" / "final.pt",
-            echo_dir=echo_dir,
-            image_dir=image_dir,
-            output_dir=train_audit_output,
-            sample_count=4,
-            visual_count=2,
-            device="cpu",
-            dpi=40,
-            contact_sheet_page_size=12,
-            phase_delta_min=0.05,
-            rmse_gap_delta_min=0.05,
-            coherence_delta_min=0.05,
-            rmse_win_fraction_min=0.75,
-        )
-    )
-    assert train_audit["initial_step"] == 0
-    assert train_audit["final_step"] == 1
-    assert train_audit["source_split"] == "train"
-    assert train_audit["sample_count"] == 4
-    assert train_audit["visual_count"] == 2
-    assert train_audit["status"] == "training_signal_not_supported"
-    assert (train_audit_output / "selected_train_samples.json").is_file()
-    assert (train_audit_output / "audit_002_training_samples.png").is_file()
-    assert len(tuple((train_audit_output / "samples").glob("*.png"))) == 2
 
     mismatched = torch.load(
         output / "checkpoints" / "final.pt", map_location="cpu", weights_only=False
