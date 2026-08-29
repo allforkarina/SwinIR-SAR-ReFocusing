@@ -155,7 +155,11 @@ class WindowAttention(nn.Module):
                 token_count,
             )
 
+        # softmax activate and dropout for attention weights.
         attn = self.attn_drop(self.softmax(attn))
+
+        # [B, H, N, N] @ [B, H, N, C/H] -> [B, H, N, C/H]
+        # then permute to [B, N, H, C/H], reshape to [B, N, C].
         x = (attn @ v).transpose(1, 2).reshape(
             batch_windows,
             token_count,

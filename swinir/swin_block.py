@@ -50,6 +50,8 @@ class SwinTransformerBlock(nn.Module):
             )
 
         self.norm1 = norm_layer(dim)                        # LayerNorm for each input feature channel.
+
+        # Window Attention module, with relative position bias and dropout.
         self.attn = WindowAttention(
             dim,
             window_size=to_2tuple(self.window_size),
@@ -59,8 +61,11 @@ class SwinTransformerBlock(nn.Module):
             attn_drop=attn_drop,
             proj_drop=drop,
         )
+        # random branch dropout for each batch, to reduce overfitting.
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
+
+        # MLP, hidden features = dim * mlp_ratio.
         self.mlp = Mlp(
             in_features=dim,
             hidden_features=int(dim * mlp_ratio),
@@ -68,6 +73,7 @@ class SwinTransformerBlock(nn.Module):
             drop=drop,
         )
 
+        # Compute the shifted-window attention mask when needed.
         attn_mask = (
             self.calculate_mask(self.input_resolution) if self.shift_size > 0 else None
         )
