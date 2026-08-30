@@ -113,8 +113,41 @@ def test_farthest_selection_is_deterministic_and_non_overlapping(tmp_path: Path)
     second = select_spatially_distributed_pairs(
         pairs, sample_count=5, anchor_filename=anchor, patch_shape=(16, 16)
     )
+    expanded = select_spatially_distributed_pairs(
+        pairs, sample_count=7, anchor_filename=anchor, patch_shape=(16, 16)
+    )
+    row_span = max(pair.row for pair in pairs) - min(pair.row for pair in pairs)
+    col_span = max(pair.col for pair in pairs) - min(pair.col for pair in pairs)
+    reference = [next(pair for pair in pairs if pair.echo_path.name == anchor)]
+    while len(reference) < 7:
+        eligible = [
+            pair
+            for pair in pairs
+            if pair not in reference
+            and all(not patches_overlap(pair, chosen, (16, 16)) for chosen in reference)
+        ]
+        reference.append(
+            max(
+                eligible,
+                key=lambda pair: (
+                    min(
+                        ((pair.row - chosen.row) / row_span) ** 2
+                        + ((pair.col - chosen.col) / col_span) ** 2
+                        for chosen in reference
+                    ),
+                    -pair.row,
+                    -pair.col,
+                ),
+            )
+        )
 
     assert [pair.echo_path.name for pair in first] == [pair.echo_path.name for pair in second]
+    assert [pair.echo_path.name for pair in first] == [
+        pair.echo_path.name for pair in expanded[:5]
+    ]
+    assert [pair.echo_path.name for pair in expanded] == [
+        pair.echo_path.name for pair in reference
+    ]
     assert first[0].echo_path.name == anchor
     for index, pair in enumerate(first):
         assert all(

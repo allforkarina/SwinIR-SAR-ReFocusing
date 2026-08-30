@@ -24,6 +24,10 @@ from swinir.sar_dataset import (
 
 EXPERIMENT = "E011-B-D001-controlled-64-train-overfit"
 EXPERIMENT_LABEL = "E011-B/64"
+CURRICULUM_EXPERIMENTS = {
+    "E013-A-D001-curriculum-128-phase-subset": "E013-A/128",
+    "E013-B-D001-curriculum-512-phase-subset": "E013-B/512",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +46,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--resume", type=Path)
+    parser.add_argument(
+        "--init-checkpoint",
+        type=Path,
+        help="Load RAW/EMA weights only; optimizer, RNG, and local step start fresh.",
+    )
     parser.add_argument("--device", default="auto")
     return parser.parse_args()
 
@@ -54,8 +63,9 @@ def _require_positive_int(mapping: dict[str, Any], name: str) -> int:
 
 
 def validate_profile(config: dict[str, Any]) -> None:
-    if config.get("experiment") != EXPERIMENT:
-        raise ValueError(f"config.experiment must be {EXPERIMENT!r}")
+    experiment = config.get("experiment")
+    if experiment != EXPERIMENT and experiment not in CURRICULUM_EXPERIMENTS:
+        raise ValueError("config.experiment is not a supported phase-subset profile")
     selection = config.get("selection")
     runtime = config.get("runtime")
     evaluation = config.get("evaluation")
@@ -100,6 +110,31 @@ def validate_profile(config: dict[str, Any]) -> None:
     for name in required:
         if not math.isfinite(float(criteria[name])):
             raise ValueError(f"evaluation.success_criteria.{name} must be finite")
+    if experiment in CURRICULUM_EXPERIMENTS:
+        initialization = config.get("initialization")
+        if not isinstance(initialization, dict):
+            raise ValueError("curriculum config.initialization must be a mapping")
+        if initialization.get("mode") != "raw_and_ema_weights_only":
+            raise ValueError("curriculum initialization must load RAW/EMA weights only")
+        if not isinstance(initialization.get("expected_source_experiment"), str):
+            raise ValueError("initialization.expected_source_experiment is required")
+        _require_positive_int(initialization, "expected_source_sample_count")
+        probes = evaluation.get("probe_sample_indices")
+        artifacts = evaluation.get("artifact_sample_indices")
+        for name, values in (("probe_sample_indices", probes), ("artifact_sample_indices", artifacts)):
+            if not isinstance(values, list) or not values:
+                raise ValueError(f"evaluation.{name} must be a non-empty list")
+            indices = [int(value) for value in values]
+            if len(indices) != len(set(indices)):
+                raise ValueError(f"evaluation.{name} must contain unique indices")
+            if min(indices) < 0 or max(indices) >= sample_count:
+                raise ValueError(f"evaluation.{name} contains an out-of-range index")
+        if not set(int(value) for value in artifacts).issubset(
+            int(value) for value in probes
+        ):
+            raise ValueError("artifact probes must be included in evaluation probes")
+        if not isinstance(runtime.get("stop_on_success"), bool):
+            raise ValueError("runtime.stop_on_success must be boolean")
 
 
 def _joint_args(args: argparse.Namespace, config: dict[str, Any]) -> argparse.Namespace:
@@ -144,6 +179,18 @@ def _joint_args(args: argparse.Namespace, config: dict[str, Any]) -> argparse.Na
 def run(args: argparse.Namespace) -> dict[str, Any]:
     config = load_base_config(args.config)
     validate_profile(config)
+    experiment = str(config["experiment"])
+    is_curriculum = experiment in CURRICULUM_EXPERIMENTS
+    init_checkpoint = getattr(args, "init_checkpoint", None)
+    if is_curriculum:
+        if init_checkpoint is None:
+            raise ValueError("curriculum training requires --init-checkpoint")
+        if not init_checkpoint.is_file():
+            raise FileNotFoundError(
+                f"initialization checkpoint does not exist: {init_checkpoint}"
+            )
+    elif init_checkpoint is not None:
+        raise ValueError("E011-B does not accept --init-checkpoint")
     selection = config["selection"]
     manifest = build_manifest(
         args.echo_dir,
@@ -185,8 +232,29 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         _joint_args(args, config),
         candidate_pairs=candidates,
         selection_metadata=metadata,
-        experiment=EXPERIMENT,
-        experiment_label=EXPERIMENT_LABEL,
+        experiment=experiment,
+        experiment_label=(
+            CURRICULUM_EXPERIMENTS[experiment]
+            if is_curriculum
+            else EXPERIMENT_LABEL
+        ),
+        initialization_checkpoint=init_checkpoint,
+        expected_initialization=(config["initialization"] if is_curriculum else None),
+        evaluation_sample_indices=(
+            config["evaluation"]["probe_sample_indices"]
+            if is_curriculum
+            else None
+        ),
+        artifact_sample_indices=(
+            config["evaluation"]["artifact_sample_indices"]
+            if is_curriculum
+            else None
+        ),
+        stop_on_success=(
+            bool(config["runtime"]["stop_on_success"])
+            if is_curriculum
+            else True
+        ),
     )
 
 

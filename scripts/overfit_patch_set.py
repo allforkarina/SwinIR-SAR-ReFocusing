@@ -118,38 +118,51 @@ def select_spatially_distributed_pairs(
     col_values = [pair.col for pair in pairs]
     row_span = max(max(row_values) - min(row_values), 1)
     col_span = max(max(col_values) - min(col_values), 1)
-    selected = [anchors[0]]
+    anchor_index = next(
+        index for index, pair in enumerate(pairs) if pair.echo_path.name == anchor_filename
+    )
+    selected_indices = [anchor_index]
+    eligible = [True] * len(pairs)
+    eligible[anchor_index] = False
+    minimum_distances = [math.inf] * len(pairs)
 
-    while len(selected) < sample_count:
-        eligible = [
-            pair
-            for pair in pairs
-            if pair not in selected
-            and all(not patches_overlap(pair, chosen, patch_shape) for chosen in selected)
-        ]
-        if not eligible:
-            raise ValueError(
-                "cannot select the requested number of mutually non-overlapping patches; "
-                f"selected={len(selected)}, requested={sample_count}, "
-                f"patch_shape={patch_shape}"
-            )
-
-        def minimum_distance(pair: DiscoveredPair) -> float:
-            return min(
+    def update_from(chosen_index: int) -> None:
+        chosen = pairs[chosen_index]
+        for index, pair in enumerate(pairs):
+            if not eligible[index]:
+                continue
+            if patches_overlap(pair, chosen, patch_shape):
+                eligible[index] = False
+                continue
+            distance = (
                 ((pair.row - chosen.row) / row_span) ** 2
                 + ((pair.col - chosen.col) / col_span) ** 2
-                for chosen in selected
             )
+            minimum_distances[index] = min(minimum_distances[index], distance)
 
+    update_from(anchor_index)
+    while len(selected_indices) < sample_count:
+        eligible_indices = [index for index, value in enumerate(eligible) if value]
+        if not eligible_indices:
+            raise ValueError(
+                "cannot select the requested number of mutually non-overlapping patches; "
+                f"selected={len(selected_indices)}, requested={sample_count}, "
+                f"patch_shape={patch_shape}"
+            )
         # Negative coordinates make lexicographically smaller coordinates win ties.
-        selected.append(
-            max(
-                eligible,
-                key=lambda pair: (minimum_distance(pair), -pair.row, -pair.col),
-            )
+        chosen_index = max(
+            eligible_indices,
+            key=lambda index: (
+                minimum_distances[index],
+                -pairs[index].row,
+                -pairs[index].col,
+            ),
         )
+        selected_indices.append(chosen_index)
+        eligible[chosen_index] = False
+        update_from(chosen_index)
 
-    return tuple(selected)
+    return tuple(pairs[index] for index in selected_indices)
 
 
 def selection_manifest(

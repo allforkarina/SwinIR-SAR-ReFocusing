@@ -5,15 +5,19 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 import yaml
 from scipy.io import savemat
 
 from scripts.overfit_phase_correction_patch_set import (
+    apply_initialization_weights,
     ema_decay_with_warmup,
     run,
     summarize_metric_map,
+    validate_initialization_checkpoint,
 )
 from scripts.overfit_single_phase_correction import PhaseSuccessCriteria
+from swinir import SwinIR
 
 
 def _phase_pair(shape: tuple[int, int], seed: int) -> tuple[np.ndarray, np.ndarray]:
@@ -114,6 +118,125 @@ def test_ema_decay_warmup_tracks_early_raw_weights() -> None:
     assert ema_decay_with_warmup(1, 0.999) == pytest.approx(0.5)
     assert ema_decay_with_warmup(999, 0.999) == pytest.approx(0.999)
     assert ema_decay_with_warmup(9999, 0.99) == pytest.approx(0.99)
+
+
+def test_curriculum_initialization_requires_a_nested_prefix_and_loads_only_weights(
+    tmp_path: Path,
+) -> None:
+    model_config = {
+        "img_size": 16,
+        "patch_size": 1,
+        "in_chans": 2,
+        "embed_dim": 12,
+        "depths": [1],
+        "num_heads": [3],
+        "window_size": 4,
+        "mlp_ratio": 2.0,
+        "qkv_bias": True,
+        "qk_scale": None,
+        "drop_rate": 0.0,
+        "attn_drop_rate": 0.0,
+        "drop_path_rate": 0.0,
+        "ape": False,
+        "patch_norm": True,
+        "use_checkpoint": False,
+        "upscale": 1,
+        "img_range": 1.0,
+        "upsampler": "",
+        "resi_connection": "1conv",
+    }
+    data = {
+        "expected_shape": [16, 16],
+        "rms_epsilon": 1.0e-12,
+        "fft_norm": "ortho",
+        "representation": "phase-test",
+    }
+    source_names = ["a.mat", "b.mat"]
+    source_samples = [
+        {
+            "filename": name,
+            "row": index,
+            "col": index,
+            "echo_sha256": f"echo-{index}",
+            "image_sha256": f"image-{index}",
+            "echo_size_bytes": index + 1,
+            "image_size_bytes": index + 2,
+        }
+        for index, name in enumerate(source_names)
+    ]
+    source_model = SwinIR(**model_config)
+    source_ema = SwinIR(**model_config)
+    with torch.no_grad():
+        for parameter in source_model.parameters():
+            parameter.fill_(0.25)
+        for parameter in source_ema.parameters():
+            parameter.fill_(0.5)
+    source_resolved = {
+        "experiment": "source-experiment",
+        "model": model_config,
+        "data": data,
+        "runtime": {"ema_update_offset": 10},
+        "selection_manifest": {
+            "dataset_manifest_fingerprint": "dataset",
+            "fingerprint": "source-selection",
+            "samples": source_samples,
+        },
+    }
+    checkpoint_path = tmp_path / "source.pt"
+    torch.save(
+        {
+            "schema_version": 1,
+            "step": 20,
+            "model": source_model.state_dict(),
+            "ema_model": source_ema.state_dict(),
+            "resolved_config": source_resolved,
+        },
+        checkpoint_path,
+    )
+    target_resolved = {
+        "model": model_config,
+        "data": data,
+        "selection_manifest": {
+            "dataset_manifest_fingerprint": "dataset",
+            "samples": [*source_samples, {"filename": "c.mat"}],
+        },
+    }
+    payload, metadata = validate_initialization_checkpoint(
+        checkpoint_path,
+        resolved_config=target_resolved,
+        expected={
+            "expected_source_experiment": "source-experiment",
+            "expected_source_step": 20,
+            "expected_source_sample_count": 2,
+        },
+    )
+    target_model = SwinIR(**model_config)
+    target_ema = SwinIR(**model_config)
+    apply_initialization_weights(payload, target_model, target_ema)
+
+    assert metadata["ema_update_offset"] == 30
+    assert metadata["optimizer_restored"] is False
+    assert all(
+        torch.equal(target_model.state_dict()[name], value)
+        for name, value in source_model.state_dict().items()
+    )
+    assert all(
+        torch.equal(target_ema.state_dict()[name], value)
+        for name, value in source_ema.state_dict().items()
+    )
+
+    target_resolved["selection_manifest"]["samples"][:2] = list(
+        reversed(source_samples)
+    )
+    with pytest.raises(RuntimeError, match="not a deterministic nested extension"):
+        validate_initialization_checkpoint(
+            checkpoint_path,
+            resolved_config=target_resolved,
+            expected={
+                "expected_source_experiment": "source-experiment",
+                "expected_source_sample_count": 2,
+            },
+        )
 
 
 def _args(

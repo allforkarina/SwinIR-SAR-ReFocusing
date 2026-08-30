@@ -452,6 +452,93 @@ def restore_checkpoint(
     return checkpoint
 
 
+def validate_initialization_checkpoint(
+    path: Path,
+    *,
+    resolved_config: dict[str, Any],
+    expected: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate a nested curriculum source without restoring optimizer state."""
+
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise RuntimeError("unsupported phase initialization checkpoint schema")
+    source = checkpoint.get("resolved_config")
+    if not isinstance(source, dict):
+        raise RuntimeError("initialization checkpoint is missing resolved_config")
+    if source.get("experiment") != expected.get("expected_source_experiment"):
+        raise RuntimeError("initialization checkpoint experiment does not match")
+    expected_step = expected.get("expected_source_step")
+    if expected_step is not None and checkpoint.get("step") != int(expected_step):
+        raise RuntimeError("initialization checkpoint step does not match")
+    if source.get("model") != resolved_config.get("model"):
+        raise RuntimeError("initialization checkpoint model contract does not match")
+    for name in ("expected_shape", "rms_epsilon", "fft_norm", "representation"):
+        if source.get("data", {}).get(name) != resolved_config.get("data", {}).get(name):
+            raise RuntimeError(
+                f"initialization checkpoint data contract differs for {name}"
+            )
+    source_manifest = source.get("selection_manifest")
+    target_manifest = resolved_config.get("selection_manifest")
+    if not isinstance(source_manifest, dict) or not isinstance(target_manifest, dict):
+        raise RuntimeError("initialization checkpoint is missing selection metadata")
+    if source_manifest.get("dataset_manifest_fingerprint") != target_manifest.get(
+        "dataset_manifest_fingerprint"
+    ):
+        raise RuntimeError("initialization and target datasets differ")
+    source_samples = source_manifest.get("samples")
+    target_samples = target_manifest.get("samples")
+    expected_count = int(expected.get("expected_source_sample_count", 0))
+    if not isinstance(source_samples, list) or len(source_samples) != expected_count:
+        raise RuntimeError("initialization source sample count does not match")
+    if not isinstance(target_samples, list) or len(target_samples) <= len(source_samples):
+        raise RuntimeError("curriculum target must strictly expand the source sample set")
+    identity_fields = (
+        "filename",
+        "row",
+        "col",
+        "echo_sha256",
+        "image_sha256",
+        "echo_size_bytes",
+        "image_size_bytes",
+    )
+    for index, (source_sample, target_sample) in enumerate(
+        zip(source_samples, target_samples, strict=False)
+    ):
+        if any(
+            source_sample.get(name) != target_sample.get(name)
+            for name in identity_fields
+        ):
+            raise RuntimeError(
+                "curriculum target is not a deterministic nested extension of "
+                f"the source at selection index {index}"
+            )
+    previous_offset = int(source.get("runtime", {}).get("ema_update_offset", 0))
+    step = int(checkpoint.get("step", 0))
+    metadata = {
+        "mode": "raw_and_ema_weights_only",
+        "source_path": str(path.resolve()),
+        "source_experiment": source["experiment"],
+        "source_step": step,
+        "source_sample_count": len(source_samples),
+        "source_selection_manifest_fingerprint": source_manifest.get("fingerprint"),
+        "optimizer_restored": False,
+        "scheduler_restored": False,
+        "scaler_restored": False,
+        "rng_restored": False,
+        "local_step_restarted_at_zero": True,
+        "ema_update_offset": previous_offset + step,
+    }
+    return checkpoint, metadata
+
+
+def apply_initialization_weights(
+    checkpoint: dict[str, Any], model: nn.Module, ema_model: nn.Module
+) -> None:
+    model.load_state_dict(checkpoint["model"], strict=True)
+    ema_model.load_state_dict(checkpoint["ema_model"], strict=True)
+
+
 def make_resolved_config(
     args: argparse.Namespace,
     base: dict[str, Any],
@@ -540,6 +627,11 @@ def run(
     selection_metadata: dict[str, Any] | None = None,
     experiment: str = "E009-D002-joint-phase-correction-patch-set",
     experiment_label: str = "E009",
+    initialization_checkpoint: Path | None = None,
+    expected_initialization: dict[str, Any] | None = None,
+    evaluation_sample_indices: Sequence[int] | None = None,
+    artifact_sample_indices: Sequence[int] | None = None,
+    stop_on_success: bool = True,
 ) -> dict[str, Any]:
     validate_args(args)
     criteria = PhaseSuccessCriteria(
@@ -597,6 +689,68 @@ def run(
         criteria=criteria,
         experiment=experiment,
     )
+    initialization_payload: dict[str, Any] | None = None
+    initialization_metadata: dict[str, Any] = {
+        "mode": "random_seeded",
+        "ema_update_offset": 0,
+    }
+    if initialization_checkpoint is not None:
+        if expected_initialization is None:
+            raise ValueError("expected_initialization is required with a source checkpoint")
+        initialization_payload, initialization_metadata = (
+            validate_initialization_checkpoint(
+                initialization_checkpoint,
+                resolved_config=resolved,
+                expected=expected_initialization,
+            )
+        )
+    elif expected_initialization is not None:
+        raise ValueError("curriculum profile requires an initialization checkpoint")
+    resolved["runtime"]["initialization"] = initialization_metadata
+    resolved["runtime"]["ema_update_offset"] = int(
+        initialization_metadata["ema_update_offset"]
+    )
+
+    def select_samples(
+        indices: Sequence[int] | None, *, role: str
+    ) -> tuple[LoadedPhaseSample, ...]:
+        if indices is None:
+            return tuple(samples)
+        normalized = tuple(int(index) for index in indices)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError(f"{role} sample indices must be unique")
+        if any(index < 0 or index >= len(samples) for index in normalized):
+            raise ValueError(f"{role} sample index is outside the selected subset")
+        if not normalized:
+            raise ValueError(f"{role} sample indices must not be empty")
+        return tuple(samples[index] for index in normalized)
+
+    evaluation_samples = select_samples(
+        evaluation_sample_indices, role="evaluation"
+    )
+    artifact_samples = select_samples(artifact_sample_indices, role="artifact")
+    evaluation_names = {sample.filename for sample in evaluation_samples}
+    if any(sample.filename not in evaluation_names for sample in artifact_samples):
+        raise ValueError("artifact samples must be included in the evaluation probe set")
+    resolved["evaluation"]["scope"] = (
+        "all_selected_samples"
+        if evaluation_sample_indices is None
+        else "fixed_pre_registered_probe_subset"
+    )
+    resolved["evaluation"]["sample_indices"] = (
+        None
+        if evaluation_sample_indices is None
+        else [int(index) for index in evaluation_sample_indices]
+    )
+    resolved["evaluation"]["sample_filenames"] = [
+        sample.filename for sample in evaluation_samples
+    ]
+    resolved["evaluation"]["stop_on_success"] = bool(stop_on_success)
+    resolved["evaluation"]["artifact_sample_indices"] = (
+        None
+        if artifact_sample_indices is None
+        else [int(index) for index in artifact_sample_indices]
+    )
     paths = make_run_paths(args.output_dir, resuming=args.resume is not None)
     manifest_path = paths.root / "selected_samples.json"
     if args.resume is None:
@@ -622,6 +776,16 @@ def run(
     set_seed(int(args.seed))
     model = SwinIR(**resolved["model"]).to(device)
     ema_model = make_ema_model(model).to(device)
+    if initialization_payload is not None and args.resume is None:
+        apply_initialization_weights(initialization_payload, model, ema_model)
+        print(
+            "initialized RAW/EMA weights from "
+            f"{initialization_metadata['source_experiment']} "
+            f"step={initialization_metadata['source_step']}; "
+            "optimizer and local step start fresh",
+            flush=True,
+        )
+    initialization_payload = None
     optimization = resolved["optimization"]
     evaluation = resolved["evaluation"]
     optimizer = Adam(
@@ -642,7 +806,7 @@ def run(
             "charbonnier_epsilon",
         )
     }
-    baselines = baseline_metrics(samples)
+    baselines = baseline_metrics(evaluation_samples)
     step = 0
     best_pass_count = -1
     best_worst_rmse_excess = math.inf
@@ -694,7 +858,7 @@ def run(
         predictions, summaries = evaluate_patch_set(
             model,
             ema_model,
-            samples,
+            evaluation_samples,
             criteria,
             device=device,
             precision=precision,
@@ -714,6 +878,7 @@ def run(
         last_metrics = {
             "step": step,
             "completed_epochs": step / len(samples),
+            "evaluation_sample_count": len(evaluation_samples),
             "timestamp_utc": utc_now(),
             "mean_train_loss_since_last_evaluation": mean_train_loss,
             "raw": summaries["raw"],
@@ -729,7 +894,7 @@ def run(
         print(
             f"step={step} epochs={step / len(samples):.1f} "
             f"train_loss={mean_train_loss if mean_train_loss is not None else float('nan'):.6f} "
-            f"raw_pass={pass_count}/{len(samples)} "
+            f"raw_pass={pass_count}/{len(evaluation_samples)} "
             f"min_phase={aggregate['weighted_phase_alignment']['min']:.4f} "
             f"worst_oracle_gap={worst_gap:.4f} "
             f"min_coh_frac={aggregate['coherence_fraction_of_oracle']['min']:.4f} "
@@ -755,18 +920,30 @@ def run(
     try:
         if args.resume is None:
             last_predictions = evaluate_and_record(None)
-            save_representative_artifacts(
-                paths,
-                step=step,
-                samples=samples,
-                predictions=last_predictions,
-                metrics={"raw": last_metrics["raw"], "ema": last_metrics["ema"]},
-                anchor_filename=args.anchor_filename,
-                floor_db=float(evaluation["log_magnitude_floor_db"]),
-                experiment_label=experiment_label,
-            )
+            if artifact_sample_indices is None:
+                save_representative_artifacts(
+                    paths,
+                    step=step,
+                    samples=evaluation_samples,
+                    predictions=last_predictions,
+                    metrics={"raw": last_metrics["raw"], "ema": last_metrics["ema"]},
+                    anchor_filename=args.anchor_filename,
+                    floor_db=float(evaluation["log_magnitude_floor_db"]),
+                    experiment_label=experiment_label,
+                )
+            else:
+                save_named_artifacts(
+                    paths,
+                    step=step,
+                    samples=evaluation_samples,
+                    predictions=last_predictions,
+                    metrics={"raw": last_metrics["raw"], "ema": last_metrics["ema"]},
+                    filenames=[sample.filename for sample in artifact_samples],
+                    floor_db=float(evaluation["log_magnitude_floor_db"]),
+                    experiment_label=experiment_label,
+                )
         overflow_streak = 0
-        while step < args.steps and success_step is None:
+        while step < args.steps and (not stop_on_success or success_step is None):
             sample = samples[
                 shuffled_sample_index(step, len(samples), int(args.seed))
             ]
@@ -785,7 +962,10 @@ def run(
                 fft_norm=str(resolved["data"]["fft_norm"]),
                 phasor_epsilon=float(optimization["phasor_epsilon"]),
                 loss_config=loss_config,
-                ema_decay=ema_decay_with_warmup(step, float(args.ema_decay)),
+                ema_decay=ema_decay_with_warmup(
+                    int(resolved["runtime"]["ema_update_offset"]) + step,
+                    float(args.ema_decay),
+                ),
             )
             if not result.did_optimizer_step:
                 overflow_streak += 1
@@ -805,16 +985,28 @@ def run(
             if step % args.save_every == 0:
                 if last_evaluation_step != step or last_predictions is None:
                     raise RuntimeError("save interval must coincide with an evaluation")
-                save_representative_artifacts(
-                    paths,
-                    step=step,
-                    samples=samples,
-                    predictions=last_predictions,
-                    metrics={"raw": last_metrics["raw"], "ema": last_metrics["ema"]},
-                    anchor_filename=args.anchor_filename,
-                    floor_db=float(evaluation["log_magnitude_floor_db"]),
-                    experiment_label=experiment_label,
-                )
+                if artifact_sample_indices is None:
+                    save_representative_artifacts(
+                        paths,
+                        step=step,
+                        samples=evaluation_samples,
+                        predictions=last_predictions,
+                        metrics={"raw": last_metrics["raw"], "ema": last_metrics["ema"]},
+                        anchor_filename=args.anchor_filename,
+                        floor_db=float(evaluation["log_magnitude_floor_db"]),
+                        experiment_label=experiment_label,
+                    )
+                else:
+                    save_named_artifacts(
+                        paths,
+                        step=step,
+                        samples=evaluation_samples,
+                        predictions=last_predictions,
+                        metrics={"raw": last_metrics["raw"], "ema": last_metrics["ema"]},
+                        filenames=[sample.filename for sample in artifact_samples],
+                        floor_db=float(evaluation["log_magnitude_floor_db"]),
+                        experiment_label=experiment_label,
+                    )
                 save_checkpoint(paths.checkpoints / "latest.pt", **checkpoint_kwargs())
     except KeyboardInterrupt:
         interrupted = True
@@ -827,7 +1019,7 @@ def run(
         last_predictions, _ = evaluate_patch_set(
             model,
             ema_model,
-            samples,
+            evaluation_samples,
             criteria,
             device=device,
             precision=precision,
@@ -835,14 +1027,14 @@ def run(
             optimization=optimization,
             evaluation=evaluation,
         )
-    artifact_samples = [sample.filename for sample in samples]
+    artifact_filenames = [sample.filename for sample in artifact_samples]
     save_named_artifacts(
         paths,
         step=step,
-        samples=samples,
+        samples=evaluation_samples,
         predictions=last_predictions,
         metrics={"raw": last_metrics["raw"], "ema": last_metrics["ema"]},
-        filenames=artifact_samples,
+        filenames=artifact_filenames,
         floor_db=float(evaluation["log_magnitude_floor_db"]),
         experiment_label=experiment_label,
     )
@@ -856,6 +1048,9 @@ def run(
         "status": status,
         "step": step,
         "completed_epochs": step / len(samples),
+        "training_sample_count": len(samples),
+        "evaluation_sample_count": len(evaluation_samples),
+        "initialization": initialization_metadata,
         "success_step": success_step,
         "inference_contract": "Echo spectrum is the only model input; Image is unavailable",
         "selection_manifest": manifest,
@@ -873,7 +1068,7 @@ def run(
             "selection_manifest": str(manifest_path.resolve()),
             "best_checkpoint": str((paths.checkpoints / "best.pt").resolve()),
             "final_checkpoint": str((paths.checkpoints / "final.pt").resolve()),
-            "final_audit_samples": artifact_samples,
+            "final_audit_samples": artifact_filenames,
         },
     }
     write_json(paths.report, report)

@@ -20,9 +20,12 @@
 | [E010](010-d001-phase-spatial-holdout.md) | D001空间留出泛化 | 失败 | 约3.18 updates/sample不足，验证与训练均未学习 | 保留，后续需重跑 | 删除本轮全部checkpoint |
 | [E011-A](011-a-d001-seen-training-checkpoint-progress.md) | E010训练checkpoint离线诊断 | 无学习信号 | 证明E010早停权重尚未记忆训练集 | 一次性入口已移除 | 无新增checkpoint |
 | [E011-B](011-b-d001-controlled-64-train-overfit.md) | 固定64训练样本充分曝光 | 进行中；step 147200保存中断 | 指标持续改善，但尚未达到64/64 | 保留 | 当前仅保留可读`best.pt` |
+| [E012](012-d001-frozen-e011b-unseen-spatial-evaluation.md) | 冻结E011-B评估441个未见patch | 失败 | Raw/EMA相位alignment约为0，确认当前权重没有同场景零训练泛化 | 保留 | 不产生checkpoint |
+| [E013](013-d001-curriculum-128-512-phase-subsets.md) | 64→128→512课程式相位训练 | 待运行 | 观察固定probe是否从发散向聚焦改善，不要求全样本严格过拟合 | 保留 | 每阶段保留best/latest及人工选定权重 |
 
 当前不能声称模型已经泛化。已经确认的是：相位Oracle能够恢复聚焦结构，SwinIR能够记忆
-1个和16个训练样本；64样本仍在受控过拟合诊断中；E010尚未得到充分训练后的空间留出证据。
+训练样本；E012进一步确认step 140800的64样本权重在441个未见patch上没有可测量的相位泛化。
+E013转向128和512样本的课程式训练，先观察扩大样本后是否仍有稳定的重聚焦学习信号。
 
 ## 代码保留边界
 
