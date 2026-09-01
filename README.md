@@ -81,3 +81,23 @@ assert y.shape == x.shape
 ```bash
 python scripts/compare_official.py
 ```
+
+## 新数据集只读相位审计
+
+`scripts/analyze_phase_dataset.py` 对配对 Echo/Image MAT 目录执行只读审计，
+包括文件配对与结构、坐标和重叠关系、候选原始大图分组、受门禁控制的拼接预览、
+phase-only Oracle 可恢复性、频带相位统计以及圆周相位 PCA。该入口不会建立
+train/validation/test 划分，也不会写入或修改输入目录；全部产物只能写到显式指定的
+独立输出目录。
+
+```bash
+python scripts/analyze_phase_dataset.py \
+  --echo-dir /data/dyn/capella/output/echo \
+  --image-dir /data/dyn/capella/output/image \
+  --output-dir runs/capella_phase_dataset_audit
+```
+
+主要产物包括 `summary.json`、完整配对清单、MAT 元数据模式、相邻 patch
+重叠指标、逐样本 phase-only Oracle 指标、相位 PCA 图表和通过拼接门禁的候选大图
+预览。`summary.json` 中的 `parent_grouping_confirmed` 默认保持为 `false`，文件名
+后缀或自动候选分组必须结合元数据与重叠报告人工确认。
