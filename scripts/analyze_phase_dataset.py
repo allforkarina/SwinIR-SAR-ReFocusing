@@ -851,7 +851,15 @@ def group_stitchability(
             complex_corr = distribution([row["complex_correlation"] for row in selected])
             magnitude_corr = distribution([row["magnitude_correlation"] for row in selected])
             relative_rmse = distribution([row["relative_rmse"] for row in selected])
-            complex_valid = bool(selected) and float(complex_corr.get("median") or 0.0) >= 0.95 and float(relative_rmse.get("median") or math.inf) <= 0.20
+            complex_corr_median = complex_corr.get("median")
+            relative_rmse_median = relative_rmse.get("median")
+            complex_valid = (
+                bool(selected)
+                and complex_corr_median is not None
+                and relative_rmse_median is not None
+                and float(complex_corr_median) >= 0.95
+                and float(relative_rmse_median) <= 0.20
+            )
             magnitude_valid = bool(selected) and float(magnitude_corr.get("median") or 0.0) >= 0.90
             role_result[role] = {
                 "analyzed_overlap_count": len(selected),

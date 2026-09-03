@@ -1,0 +1,87 @@
+# E015: controlled 64-patch diagnostic of phase-stage supervision targets.
+experiment: E015-D001-phase-supervision-target-ablation-64
+
+model:
+  img_size: 512
+  patch_size: 1
+  in_chans: 2
+  embed_dim: 180
+  depths: [6, 6, 6, 6, 6, 6]
+  num_heads: [6, 6, 6, 6, 6, 6]
+  window_size: 8
+  mlp_ratio: 2.0
+  qkv_bias: true
+  qk_scale: null
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.0
+  ape: false
+  patch_norm: true
+  use_checkpoint: false
+  upscale: 1
+  img_range: 1.0
+  upsampler: ""
+  resi_connection: "1conv"
+
+data:
+  expected_shape: [512, 512]
+  rms_epsilon: 1.0e-12
+  fft_norm: ortho
+  representation: fftshifted_echo_complex_spectrum_to_unit_phase_correction
+
+selection:
+  sample_count: 64
+  anchor_filename: patch_row_4701_col_10900.mat
+  policy: deterministic_spatially_distributed_non_overlapping
+  sample_weighting: uniform
+
+optimization:
+  optimizer: adam
+  learning_rate: 2.0e-4
+  betas: [0.9, 0.99]
+  epsilon: 1.0e-8
+  weight_decay: 0.0
+  phase_loss_weight: 1.0
+  complex_reconstruction_weight: 0.25
+  log_magnitude_weight: 0.25
+  phase_energy_weight_power: 0.5
+  phasor_epsilon: 1.0e-6
+  charbonnier_epsilon: 1.0e-3
+  ema_decay: 0.999
+
+ablation_arms:
+  A:
+    experiment: E015-A-D001-image-auxiliary-target
+    auxiliary_reconstruction_target: image
+    complex_reconstruction_weight: 0.25
+    log_magnitude_weight: 0.25
+  B:
+    experiment: E015-B-D001-phase-oracle-auxiliary-target
+    auxiliary_reconstruction_target: phase_oracle
+    complex_reconstruction_weight: 0.25
+    log_magnitude_weight: 0.25
+  C:
+    experiment: E015-C-D001-phase-loss-only
+    auxiliary_reconstruction_target: phase_oracle
+    complex_reconstruction_weight: 0.0
+    log_magnitude_weight: 0.0
+
+runtime:
+  seed: 42
+  steps: 19200
+  updates_per_sample: 300
+  eval_every: 3200
+  save_every: 3200
+  required_consecutive_successes: 3
+
+evaluation:
+  log_magnitude_floor_db: -60.0
+  high_frequency_radius_fraction: 0.25
+  success_criteria:
+    weighted_phase_alignment_min: 0.95
+    coherence_fraction_of_oracle_min: 0.90
+    ssim_gain_fraction_of_oracle_min: 0.80
+    edge_gain_fraction_of_oracle_min: 0.75
+    rmse_excess_over_oracle_max: 0.08
+    high_frequency_energy_ratio_min: 0.75
+    high_frequency_energy_ratio_max: 1.25

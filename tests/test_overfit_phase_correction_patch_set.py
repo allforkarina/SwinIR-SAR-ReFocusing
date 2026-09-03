@@ -11,6 +11,7 @@ from scipy.io import savemat
 
 from scripts.overfit_phase_correction_patch_set import (
     apply_initialization_weights,
+    auxiliary_reconstruction_target,
     ema_decay_with_warmup,
     run,
     summarize_metric_map,
@@ -118,6 +119,22 @@ def test_ema_decay_warmup_tracks_early_raw_weights() -> None:
     assert ema_decay_with_warmup(1, 0.999) == pytest.approx(0.5)
     assert ema_decay_with_warmup(999, 0.999) == pytest.approx(0.999)
     assert ema_decay_with_warmup(9999, 0.99) == pytest.approx(0.99)
+
+
+def test_auxiliary_reconstruction_target_keeps_image_and_oracle_distinct() -> None:
+    sample = type(
+        "Sample",
+        (),
+        {
+            "target_image": torch.tensor([1.0]),
+            "oracle_prediction": torch.tensor([2.0]),
+        },
+    )()
+
+    assert auxiliary_reconstruction_target(sample, "image").item() == 1.0
+    assert auxiliary_reconstruction_target(sample, "phase_oracle").item() == 2.0
+    with pytest.raises(ValueError, match="auxiliary reconstruction target"):
+        auxiliary_reconstruction_target(sample, "unknown")
 
 
 def test_curriculum_initialization_requires_a_nested_prefix_and_loads_only_weights(

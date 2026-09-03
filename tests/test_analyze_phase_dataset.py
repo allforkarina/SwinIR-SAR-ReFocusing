@@ -112,6 +112,9 @@ def test_end_to_end_audit_is_read_only_and_writes_expected_artifacts(
     ]["median"]
     assert median_closed > 0.99
     assert report["decision_gates"]["mosaic_preview_count"] == 1
+    parent = next(iter(report["stitchability"].values()))
+    assert parent["roles"]["echo"]["relative_rmse"]["median"] == pytest.approx(0.0)
+    assert parent["roles"]["echo"]["complex_stitching_valid"] is True
 
     output = tmp_path / "audit"
     for relative in (

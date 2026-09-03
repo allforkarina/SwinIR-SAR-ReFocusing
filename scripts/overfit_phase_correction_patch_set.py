@@ -74,6 +74,7 @@ METRIC_NAMES = (
     "edge_gain_fraction_of_oracle",
     "high_frequency_energy_ratio",
 )
+AUXILIARY_RECONSTRUCTION_TARGETS = ("image", "phase_oracle")
 
 
 @dataclass(frozen=True)
@@ -244,6 +245,21 @@ def baseline_metrics(samples: Sequence[LoadedPhaseSample]) -> dict[str, Any]:
             "aggregate": aggregate_metric_map(oracle, baseline_names),
         },
     }
+
+
+def auxiliary_reconstruction_target(
+    sample: LoadedPhaseSample, mode: str
+) -> torch.Tensor:
+    """Select the label used only by auxiliary reconstruction losses."""
+
+    if mode == "image":
+        return sample.target_image
+    if mode == "phase_oracle":
+        return sample.oracle_prediction
+    raise ValueError(
+        "auxiliary reconstruction target must be one of "
+        f"{AUXILIARY_RECONSTRUCTION_TARGETS}, got {mode!r}"
+    )
 
 
 @torch.no_grad()
@@ -547,11 +563,15 @@ def make_resolved_config(
     precision: PrecisionPolicy,
     criteria: PhaseSuccessCriteria,
     experiment: str = "E009-D002-joint-phase-correction-patch-set",
+    auxiliary_target: str = "image",
+    optimization_overrides: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     model = dict(base["model"])
     model["in_chans"] = 2
     model["drop_path_rate"] = 0.0
     optimization = dict(base["optimization"])
+    if optimization_overrides:
+        optimization.update(optimization_overrides)
     optimization.update(
         {
             "learning_rate": float(args.learning_rate),
@@ -560,20 +580,29 @@ def make_resolved_config(
             "max_steps": int(args.steps),
         }
     )
+    data = {
+        **base["data"],
+        "physical_batch_size": 1,
+        "sampling": "deterministic_shuffled_epochs",
+        "input_available_at_inference": "fftshift(FFT2(Echo / RMS(Echo))) only",
+        "training_target": "per-sample supervised unit phase correction",
+        "label_available_at_inference": False,
+    }
+    # Keep legacy resolved configs byte-for-byte compatible for checkpoint resume.
+    if auxiliary_target != "image" or optimization_overrides is not None:
+        data.update(
+            {
+                "auxiliary_reconstruction_target": auxiliary_target,
+                "sample_weighting": "uniform_one_optimizer_update_per_selected_patch_per_epoch",
+            }
+        )
     return {
         "schema_version": 1,
         "experiment": experiment,
         "base_config": str(args.config.resolve()),
         "selection_manifest": manifest,
         "model": model,
-        "data": {
-            **base["data"],
-            "physical_batch_size": 1,
-            "sampling": "deterministic_shuffled_epochs",
-            "input_available_at_inference": "fftshift(FFT2(Echo / RMS(Echo))) only",
-            "training_target": "per-sample supervised unit phase correction",
-            "label_available_at_inference": False,
-        },
+        "data": data,
         "optimization": optimization,
         "evaluation": {
             **base["evaluation"],
@@ -632,8 +661,15 @@ def run(
     evaluation_sample_indices: Sequence[int] | None = None,
     artifact_sample_indices: Sequence[int] | None = None,
     stop_on_success: bool = True,
+    auxiliary_target: str = "image",
+    optimization_overrides: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     validate_args(args)
+    if auxiliary_target not in AUXILIARY_RECONSTRUCTION_TARGETS:
+        raise ValueError(
+            "auxiliary_target must be one of "
+            f"{AUXILIARY_RECONSTRUCTION_TARGETS}, got {auxiliary_target!r}"
+        )
     criteria = PhaseSuccessCriteria(
         weighted_phase_alignment_min=args.success_phase_alignment,
         coherence_fraction_of_oracle_min=args.success_coherence_fraction,
@@ -688,6 +724,8 @@ def run(
         precision=precision,
         criteria=criteria,
         experiment=experiment,
+        auxiliary_target=auxiliary_target,
+        optimization_overrides=optimization_overrides,
     )
     initialization_payload: dict[str, Any] | None = None
     initialization_metadata: dict[str, Any] = {
@@ -956,7 +994,7 @@ def run(
                 sample.input_spectrum,
                 sample.target_phasor,
                 sample.phase_weights,
-                sample.target_image,
+                auxiliary_reconstruction_target(sample, auxiliary_target),
                 device=device,
                 precision=precision,
                 fft_norm=str(resolved["data"]["fft_norm"]),
@@ -1053,6 +1091,12 @@ def run(
         "initialization": initialization_metadata,
         "success_step": success_step,
         "inference_contract": "Echo spectrum is the only model input; Image is unavailable",
+        "supervision_contract": {
+            "phase_target": "unit phase-only Oracle phasor",
+            "auxiliary_reconstruction_target": auxiliary_target,
+            "evaluation_reference": "full Image with phase-only Oracle as upper baseline",
+            "sample_weighting": "uniform",
+        },
         "selection_manifest": manifest,
         "precision": precision.as_dict(),
         "baselines": baselines,
